@@ -102,15 +102,44 @@ export class UI {
     await this._initAudio();
   }
 
+  // Resolve a name-key (e.g. 'fac.human') to its localized name, else the raw id.
+  _name(nsKey, fallbackId) {
+    if (this.strings && typeof this.strings.t === 'function') {
+      const v = this.strings.t(nsKey);
+      if (v != null && v !== nsKey) return v;
+    }
+    return fallbackId;
+  }
+
+  // Replace id-valued params (faction/province/unit/terrain ids) with localized
+  // names so log/battle lines read "Аден", not "aden"; alias prov<->province.
+  _resolveParams(params) {
+    const NS = {
+      attacker: 'fac.', defender: 'fac.', faction: 'fac.', winner: 'fac.',
+      loser: 'fac.', owner: 'fac.', mover: 'fac.',
+      prov: 'prov.', province: 'prov.', from: 'prov.', to: 'prov.', target: 'prov.',
+      unit: 'unit.', terrain: 'terrain.',
+    };
+    const out = {};
+    for (const k in params) {
+      const v = params[k], ns = NS[k];
+      out[k] = (ns && typeof v === 'string') ? this._name(ns + v, v) : v;
+    }
+    if (out.prov != null && out.province == null) out.province = out.prov;
+    if (out.province != null && out.prov == null) out.prov = out.province;
+    return out;
+  }
+
   // ---- localization wrapper: always go through strings.t when available. ----
   t(key, params) {
+    const p = params ? this._resolveParams(params) : params;
     if (this.strings && typeof this.strings.t === 'function') {
-      const v = this.strings.t(key, params);
+      const v = this.strings.t(key, p);
       if (v != null && v !== key) return v;
     }
     const tbl = FALLBACK_STR[this.lang] || FALLBACK_STR.ru;
     let s = (tbl && tbl[key]) != null ? tbl[key] : key;
-    if (params) for (const k in params) s = s.replace(new RegExp('\\{' + k + '\\}', 'g'), params[k]);
+    if (p) for (const k in p) s = s.replace(new RegExp('\\{' + k + '\\}', 'g'), p[k]);
     return s;
   }
 

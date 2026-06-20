@@ -24,6 +24,7 @@ export const FACTIONS = {
     accent: '#d8e8b0',
     playable: true,
     capital: 'oren',
+    incomeMul: 1.35, // no crown-castle start: Elmore's trade compensates the income gap
     rangedBonus: 1.15,
     roster: ['knight', 'ranger', 'sorcerer', 'bishop'],
   },
@@ -34,6 +35,7 @@ export const FACTIONS = {
     accent: '#e0a04a',
     playable: true,
     capital: 'schuttgart',
+    incomeMul: 1.25, // harsh mountain home, no crown: war-spoils offset the lean land
     meleeBonus: 1.2,
     costMul: 0.85,
     roster: ['gladiator', 'destroyer', 'ranger'],

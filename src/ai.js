@@ -27,11 +27,15 @@ const AI = {
   RICH_THRESHOLD: 220, // recruit when adena above this
   RECRUITS_PER_TURN: 2, // max units an AI recruits per turn
   ATTACK_POWER_MARGIN: 1.25, // attack only if force >= margin * defender power
+  PLAYER_TRUCE_TURN: 8, // before this turn, rival lords expand into NEUTRAL land
+                        // only and do not assault other player-factions — gives
+                        // every starting position room to establish (fair opening)
   FORTIFY_CHANCE: 0.4, // chance to fortify a frontline province when idle
   // Shilen incursion scaling — a darkness that closes in over time.
-  SHILEN_START_TURN: 4, // no incursions before this turn (grace period)
+  SHILEN_START_TURN: 8, // no incursions before this turn — lets every faction
+                        // establish past the opening truce before the dark closes in
   SHILEN_BASE_STACK: 2, // undead per incursion near the start window
-  SHILEN_PER_TURN: 0.45, // additional undead per turn elapsed
+  SHILEN_PER_TURN: 0.4, // additional undead per turn elapsed
   SHILEN_MAX_STACK: 16,
   SHILEN_EVERY: 3, // incursions trigger every N turns
 };
@@ -118,6 +122,10 @@ export function takeFactionTurn(state, factionId) {
     for (const tgt of legalMoves(state, src)) {
       const dst = state.provinces[tgt];
       if (dst.owner === factionId) continue;
+      // Opening-truce: early on, only push into neutral land, never gang up on
+      // another player-faction before they have had time to establish.
+      const rivalIsPlayer = dst.owner !== NEUTRAL && dst.owner !== 'shilen';
+      if (state.turn < AI.PLAYER_TRUCE_TURN && rivalIsPlayer) continue;
       const meta = PROV_BY_ID[tgt];
       const terrainDef = meta && meta.castle ? 1.25 : 1.0;
       const fortMul = dst.fortified ? 1.3 : 1.0;

@@ -30,7 +30,7 @@ export const CONST = {
   FORTIFY_COST: 80, // Adena to fortify a province
   MIN_UPKEEP_FLOOR: 0, // adena can't go negative; bankruptcy disbands units
   CROWN_CASTLES: ['gludio', 'giran', 'aden'],
-  STARTING_GARRISON: 5, // each owned home province starts with this many units
+  STARTING_GARRISON: 6, // each owned home province starts with this many units
 };
 
 // ---------------------------------------------------------------------------

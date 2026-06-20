@@ -14,6 +14,9 @@ let dataReady = false;
 async function loadModules() {
   try {
     engine = await import('./engine.js');
+    // Side-effect import: ai.js registers itself with the engine (registerAi)
+    // so endTurn can drive rival factions + Shilen incursions. Must run once.
+    await import('./ai.js');
   } catch (e) {
     console.warn('[main] engine.js not available yet:', e.message);
   }
