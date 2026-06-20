@@ -31,6 +31,8 @@ export const CONST = {
   MIN_UPKEEP_FLOOR: 0, // adena can't go negative; bankruptcy disbands units
   CROWN_CASTLES: ['gludio', 'giran', 'aden'],
   STARTING_GARRISON: 6, // each owned home province starts with this many units
+  STARTING_WOOD: 20, // v3 multi-resource economy: starting wood per faction
+  STARTING_CRYSTAL: 5, // v3 multi-resource economy: starting crystal per faction
 };
 
 // ---------------------------------------------------------------------------
@@ -43,7 +45,15 @@ export function createGame({ playerFaction, seed }) {
 
   const factions = {};
   for (const id in FACTIONS) {
-    factions[id] = { id, adena: id === 'shilen' ? 0 : CONST.STARTING_ADENA, alive: true };
+    // Multi-resource economy (v3): every non-shilen faction also holds wood +
+    // crystal. Adena is unchanged. Shilen (AI-only) carries no economy.
+    factions[id] = {
+      id,
+      adena: id === 'shilen' ? 0 : CONST.STARTING_ADENA,
+      wood: id === 'shilen' ? 0 : CONST.STARTING_WOOD,
+      crystal: id === 'shilen' ? 0 : CONST.STARTING_CRYSTAL,
+      alive: true,
+    };
   }
 
   const provinces = {};
@@ -83,13 +93,47 @@ export function createGame({ playerFaction, seed }) {
     playerFaction: pf,
     factions,
     provinces,
+    cities: {}, // v3: lazily populated city state (owner B's city.js)
+    flags: {}, // v3: event-chain flags (setFlag effect / requiresFlag gates)
     selected: null,
     log: [],
     result: null,
   };
 
+  // v3: if a city api is registered, give each faction's capital a free
+  // level-1 townhall so cities start meaningful. Degrade silently if the city
+  // system is absent (CITY_IMPL null) — the game still plays exactly like v2.
+  seedCapitalTownhalls(state);
+
   pushLog(state, 'log.gameStart', { faction: pf, seed: s });
   return state;
+}
+
+// Give every non-shilen faction's owned capital a free level-1 townhall via the
+// registered city api. No-op when no city api is registered, when buildings
+// data is absent, or when a capital isn't actually owned by its faction.
+function seedCapitalTownhalls(state) {
+  if (!CITY_IMPL || typeof CITY_IMPL.startBuild !== 'function') return;
+  const hasCity = CITY_IMPL.hasCity;
+  for (const fid in FACTIONS) {
+    if (fid === 'shilen') continue;
+    const capId = FACTIONS[fid].capital;
+    if (!capId) continue;
+    const prov = state.provinces[capId];
+    if (!prov || prov.owner !== fid) continue;
+    if (typeof hasCity === 'function' && !hasCity(capId)) continue;
+    try {
+      // A level-1 townhall has buildTurns 0 in the contract data, so startBuild
+      // finishes it immediately. Guarded so any city-api hiccup can't break setup.
+      if (typeof CITY_IMPL.canBuild === 'function') {
+        const chk = CITY_IMPL.canBuild(state, capId, 'townhall');
+        if (!chk || !chk.ok) continue;
+      }
+      CITY_IMPL.startBuild(state, capId, 'townhall');
+    } catch (_e) {
+      /* resilient: a failed seed must never break createGame */
+    }
+  }
 }
 
 // Cheapest infantry unit a faction can field (for starting/neutral garrisons).
@@ -448,6 +492,15 @@ export function endTurn(state) {
   // 3. Income for everyone (also ticks income blessings).
   income(state);
 
+  // 3b. City tick (v3): advance every city's build queue and apply per-turn
+  // building effects (produceRes / produceUnit / defense / heal). Wired in via
+  // registerCity() (mirroring registerAi/registerEvents). Runs after income so
+  // city production lands in faction resources/garrisons each turn, before the
+  // victory check. No-op (and the game plays like v2) when no city api is set.
+  if (CITY_IMPL && typeof CITY_IMPL.cityTick === 'function') {
+    state = CITY_IMPL.cityTick(state) || state;
+  }
+
   // 4. Tick clan-skill cooldowns down by one turn.
   if (SKILLS_IMPL && SKILLS_IMPL.tickCooldowns) {
     state = SKILLS_IMPL.tickCooldowns(state);
@@ -502,6 +555,21 @@ export function registerSkills(impl) {
   SKILLS_IMPL = impl;
 }
 
+// City wiring (v3): city.js calls registerCity(impl) on import so endTurn can
+// drive city production and createGame can seed capital townhalls, all without a
+// static cyclic import (mirrors registerAi/registerEvents/registerSkills).
+// impl = { cityTick, hasCity?, canBuild?, startBuild?, ensureCity?, ... }.
+let CITY_IMPL = null;
+export function registerCity(impl) {
+  CITY_IMPL = impl;
+}
+// Accessor so other engine-core modules (ai.js) can reach the registered city
+// api (startBuild/canBuild/hasCity/...) without a static import of city.js,
+// which lives on another branch. Returns null when no city api is wired in.
+export function getCityImpl() {
+  return CITY_IMPL;
+}
+
 // Lazily create the per-game clan-skill slot. Used by skills.js.
 export function ensureSkillsState(state) {
   if (!state.skills) state.skills = { cooldowns: {} };
@@ -529,6 +597,7 @@ export function ensureSkillsState(state) {
 //   smite        { frac }                          — kill frac of target enemy garrison
 //   summon       { unit, count }                   — add units to the target province
 //   fortifyFree  {}                                — fortify the target province free
+//   setFlag      { flag }                          — set state.flags[flag]=true (v3 event-chain)
 // ---------------------------------------------------------------------------
 
 export function applyEffects(state, faction, effects, defaultProv) {
@@ -615,6 +684,16 @@ function applyOneEffect(state, fid, eff, defaultProv) {
     case 'revealMap': {
       state.revealed = true;
       pushLog(state, 'log.effect.revealMap', { faction: fid });
+      break;
+    }
+    case 'setFlag': {
+      // v3 event-chain: persist a named flag on the State so later events can
+      // gate on it via trigger.requiresFlag / forbidsFlag (see events.js).
+      if (eff.flag) {
+        if (!state.flags) state.flags = {};
+        state.flags[eff.flag] = true;
+        pushLog(state, 'log.effect.setFlag', { faction: fid, flag: eff.flag });
+      }
       break;
     }
     case 'healGarrison': {

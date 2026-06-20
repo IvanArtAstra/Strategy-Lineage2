@@ -59,7 +59,10 @@ export async function registerEvents() {
 //   owns: 'any' | n           — player province count >= n ('any' => >= 1)
 //   hasAdenaMin: n            — player adena >= n
 //   factionAny: ['orc', ...]  — player faction is in the list
+//   requiresFlag: 'x'         — only eligible if state.flags['x'] is set (v3 chain)
+//   forbidsFlag: 'x'          — only eligible if state.flags['x'] is NOT set (v3 chain)
 // An event already fired with oncePerGame is filtered out via state.eventsFired.
+// The setFlag EFFECT (which sets these flags) lives in engine.js applyEffects.
 // ---------------------------------------------------------------------------
 
 function isEligible(state, ev) {
@@ -86,6 +89,15 @@ function isEligible(state, ev) {
   if (Array.isArray(tr.factionAny)) {
     if (!tr.factionAny.includes(player)) return false;
   }
+
+  // v3 event-chain flag gates. Flags are set by the setFlag effect (handled in
+  // engine.js applyEffects) and live on state.flags. A step that requiresFlag is
+  // only eligible once its prerequisite is set; forbidsFlag excludes a step once
+  // a flag is set (e.g. a mutually-exclusive branch already taken).
+  const flags = state.flags || {};
+  if (tr.requiresFlag && !flags[tr.requiresFlag]) return false;
+  if (tr.forbidsFlag && flags[tr.forbidsFlag]) return false;
+
   return true;
 }
 

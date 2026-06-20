@@ -19,6 +19,7 @@ import {
   fortify,
   provinceMeta,
   unitCostFor,
+  getCityImpl,
 } from './engine.js';
 import { randInt, pick, shuffle } from './rng.js';
 
@@ -38,6 +39,11 @@ const AI = {
   SHILEN_PER_TURN: 0.4, // additional undead per turn elapsed
   SHILEN_MAX_STACK: 16,
   SHILEN_EVERY: 3, // incursions trigger every N turns
+  // v3 city development: the order an AI lord tries to build/upgrade buildings.
+  // Economy first (townhall + a resource building) to fund growth, then a
+  // unit-producing barracks, then walls for defence. The AI builds the FIRST
+  // affordable buildable in this list per city per turn (one build per city).
+  CITY_BUILD_PRIORITY: ['townhall', 'lumbermill', 'crystalmine', 'barracks', 'walls'],
 };
 
 const PROV_BY_ID = {};
@@ -86,6 +92,40 @@ function isFrontline(state, provId, factionId) {
 }
 
 // ---------------------------------------------------------------------------
+// developCities: for each owned city, queue the first affordable building from
+// CITY_BUILD_PRIORITY via the registered city api's startBuild (guarded by
+// canBuild). One build per city per turn. Pure no-op when the city api or the
+// buildings data is absent, so the game degrades to v2. Deterministic: iterates
+// the faction's owned provinces in their fixed order and consults canBuild.
+// ---------------------------------------------------------------------------
+
+function developCities(state, factionId, owned) {
+  const city = getCityImpl();
+  if (!city || typeof city.startBuild !== 'function') return state;
+  const canBuild = typeof city.canBuild === 'function' ? city.canBuild : null;
+  const hasCity = typeof city.hasCity === 'function' ? city.hasCity : null;
+
+  for (const provId of owned) {
+    if (hasCity && !hasCity(provId)) continue;
+    for (const buildingId of AI.CITY_BUILD_PRIORITY) {
+      let ok = true;
+      if (canBuild) {
+        const chk = canBuild(state, provId, buildingId);
+        ok = !!(chk && chk.ok);
+      }
+      if (!ok) continue;
+      try {
+        state = city.startBuild(state, provId, buildingId) || state;
+      } catch (_e) {
+        /* resilient: a city-api hiccup must never break the AI turn */
+      }
+      break; // one build per city per turn
+    }
+  }
+  return state;
+}
+
+// ---------------------------------------------------------------------------
 // takeFactionTurn: recruit when rich; attack weakest beatable adjacent
 // enemy/neutral; otherwise fortify a frontline holding.
 // ---------------------------------------------------------------------------
@@ -96,6 +136,11 @@ export function takeFactionTurn(state, factionId) {
 
   const owned = ownedBy(state, factionId);
   if (owned.length === 0) return state;
+
+  // 0. CITY DEVELOPMENT (v3): for each owned city, start the cheapest sensible
+  // affordable building/upgrade (townhall -> resource -> barracks -> walls). The
+  // AI spends wood/crystal here too. No-op if the city api is absent.
+  state = developCities(state, factionId, owned);
 
   // 1. RECRUIT when rich — bolster the richest/most exposed province.
   let recruited = 0;
