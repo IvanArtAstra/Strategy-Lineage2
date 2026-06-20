@@ -39,9 +39,17 @@ export const CONST = {
 // State construction
 // ---------------------------------------------------------------------------
 
-export function createGame({ playerFaction, seed }) {
+// createGame({ playerFaction, seed, startOwnerOverride?, objective? })
+//  startOwnerOverride: optional map provId->faction that overrides START_OWNER
+//    for the listed provinces (campaign scenarios). Omitted -> identical v3 setup.
+//  objective: optional campaign objective, stored verbatim as state.campaignObjective
+//    (checkObjective in campaign.js reads it). Omitted -> state.campaignObjective null.
+export function createGame({ playerFaction, seed, startOwnerOverride, objective } = {}) {
   const pf = PLAYABLE.includes(playerFaction) ? playerFaction : PLAYABLE[0];
   const s = (seed >>> 0) || 1;
+  const ownerOverride = startOwnerOverride && typeof startOwnerOverride === 'object'
+    ? startOwnerOverride
+    : null;
 
   const factions = {};
   for (const id in FACTIONS) {
@@ -58,7 +66,12 @@ export function createGame({ playerFaction, seed }) {
 
   const provinces = {};
   for (const p of PROVINCES) {
-    const owner = (START_OWNER && START_OWNER[p.id]) || NEUTRAL;
+    // Campaign startOwnerOverride takes precedence over the static START_OWNER
+    // for any province it names; everything else falls back to v3 behavior.
+    const overridden = ownerOverride && Object.prototype.hasOwnProperty.call(ownerOverride, p.id);
+    const owner = overridden
+      ? ownerOverride[p.id]
+      : (START_OWNER && START_OWNER[p.id]) || NEUTRAL;
     provinces[p.id] = { id: p.id, owner, garrison: {}, fortified: false };
   }
 
@@ -95,6 +108,7 @@ export function createGame({ playerFaction, seed }) {
     provinces,
     cities: {}, // v3: lazily populated city state (owner B's city.js)
     flags: {}, // v3: event-chain flags (setFlag effect / requiresFlag gates)
+    campaignObjective: objective || null, // v4: campaign scenario objective (campaign.js reads it)
     selected: null,
     log: [],
     result: null,
@@ -192,6 +206,42 @@ export function garrisonSize(garrison) {
   let n = 0;
   for (const id in garrison) n += garrison[id] | 0;
   return n;
+}
+
+// Scale a garrison's unit counts by `mul` for battle-input purposes (hero
+// bonus). Deterministic, integer-only: each present unit type is rounded but
+// never dropped below 1 (so a bonus can't accidentally erase a stack), and a
+// debuff (<1) still leaves at least one of each surviving type. mul===1 returns
+// an untouched copy, so the v3 path is byte-identical when no hero is present.
+function scaleGarrison(garrison, mul) {
+  const out = {};
+  if (!(mul > 0) || mul === 1) {
+    for (const uid in garrison) out[uid] = garrison[uid] | 0;
+    return out;
+  }
+  for (const uid in garrison) {
+    const c = garrison[uid] | 0;
+    if (c <= 0) continue;
+    out[uid] = Math.max(1, Math.round(c * mul));
+  }
+  return out;
+}
+
+// Given the REAL (pre-scale) garrison and the survivors reported from a scaled
+// battle, project survivors back onto the real stack: a unit type that was
+// wiped (0 survivors) is removed; an unscaled type keeps at most the real count.
+// Keeps map troop counts sane after a hero-scaled battle.
+function unscaleSurvivors(realGarrison, scaledSurvivors) {
+  const out = {};
+  const surv = scaledSurvivors || {};
+  for (const uid in realGarrison) {
+    const real = realGarrison[uid] | 0;
+    if (real <= 0) continue;
+    const left = surv[uid] | 0;
+    if (left <= 0) continue; // type was destroyed in the (scaled) fight
+    out[uid] = Math.min(real, left);
+  }
+  return out;
 }
 
 export function totalUpkeep(state, factionId) {
@@ -370,15 +420,28 @@ export function moveArmy(state, fromId, toId, units) {
 
   // Battle (enemy or neutral).
   const meta = PROV_BY_ID[toId];
+  // v4 hero bonus: scale each side's battle-input garrison by its province's
+  // registered hero multiplier (attacker = hero at fromId, defender = hero at
+  // toId). Guarded to {1,1} when no hero api -> identical to the v3 battle. Only
+  // the resolveBattle inputs are scaled; the *real* garrisons (moving / survivors)
+  // are unchanged, so ownership/troop bookkeeping below is exactly as before.
+  const attMul = heroMulFor(state, fromId).atkMul;
+  const defMul = heroMulFor(state, toId).defMul;
   const battle = withRng(state, (rng) =>
     resolveBattle({
-      attacker: { faction: mover, garrison: moving },
-      defender: { faction: to.owner, garrison: Object.assign({}, to.garrison) },
+      attacker: { faction: mover, garrison: scaleGarrison(moving, attMul) },
+      defender: { faction: to.owner, garrison: scaleGarrison(to.garrison, defMul) },
       terrain: meta ? meta.terrain : 'plains',
       defenderFortified: !!to.fortified,
       rng,
     })
   );
+  // Map the scaled battle survivors back to the real (unscaled) stacks so the
+  // hero bonus changes who *wins* and rough attrition, not the literal unit
+  // count on the map. A surviving type keeps min(real, reported); a wiped type
+  // is gone. (No-op when attMul===defMul===1.)
+  if (attMul !== 1) battle.attackerSurvivors = unscaleSurvivors(moving, battle.attackerSurvivors);
+  if (defMul !== 1) battle.defenderSurvivors = unscaleSurvivors(to.garrison, battle.defenderSurvivors);
 
   // Bubble battle log into state log.
   for (const entry of battle.log) pushLog(state, 'log.' + entry.key, entry.params);
@@ -568,6 +631,37 @@ export function registerCity(impl) {
 // which lives on another branch. Returns null when no city api is wired in.
 export function getCityImpl() {
   return CITY_IMPL;
+}
+
+// Hero wiring (v4): heroes.js calls registerHeroes(impl) on import so planBattle
+// can apply a province's hero combat bonus without a static import of heroes.js,
+// which lives on another branch (mirrors registerCity/registerAi). The engine
+// only ever uses impl.heroBattleBonus(state, provId) -> { atkMul, defMul }; any
+// richer hero api (recruitHero, gainHeroXp, heroAt, ...) is reachable via the
+// accessor below for ai.js / the client. No-op (v3 behavior) when never set.
+let HERO_IMPL = null;
+export function registerHeroes(impl) {
+  HERO_IMPL = impl;
+}
+export function getHeroImpl() {
+  return HERO_IMPL;
+}
+
+// Read a province's hero combat multipliers from the registered hero api,
+// fully guarded: missing api / missing fn / a throw / a malformed return all
+// degrade to the neutral { atkMul:1, defMul:1 } so heroes never change v3 math
+// when the heroes module is absent.
+function heroMulFor(state, provId) {
+  const hero = HERO_IMPL;
+  if (!hero || typeof hero.heroBattleBonus !== 'function') return { atkMul: 1, defMul: 1 };
+  try {
+    const b = hero.heroBattleBonus(state, provId);
+    const atkMul = b && Number.isFinite(b.atkMul) ? b.atkMul : 1;
+    const defMul = b && Number.isFinite(b.defMul) ? b.defMul : 1;
+    return { atkMul, defMul };
+  } catch (_e) {
+    return { atkMul: 1, defMul: 1 };
+  }
 }
 
 // Lazily create the per-game clan-skill slot. Used by skills.js.
@@ -802,6 +896,91 @@ function removeUnits(state, faction, count) {
 // The client uses these for the interactive battle, falling back to moveArmy.
 // ---------------------------------------------------------------------------
 
+// siegeInfo(state, fromId, toId)
+//  -> { siege:true, wallLevel }  when toId is an ENEMY province (owned by a
+//     different, non-neutral faction than fromId's owner) that has a city with a
+//     Walls building of level > 0.
+//  -> { siege:false }            otherwise, or when no city api is registered.
+// Reads the Walls level via the registered city api's cityView(state, toId),
+// scanning its buildings[] for the entry whose id is 'walls' and taking .level.
+// Fully guarded: any missing api / fn / throw / malformed view degrades to
+// { siege:false } so the client just runs the normal tactical battle (v2/v3).
+export function siegeInfo(state, fromId, toId) {
+  const NO = { siege: false };
+  const from = state.provinces[fromId];
+  const to = state.provinces[toId];
+  if (!from || !to) return NO;
+  // Must be an enemy province (not own, not neutral, not unowned).
+  if (to.owner === from.owner) return NO;
+  if (to.owner === NEUTRAL || !to.owner) return NO;
+
+  const city = CITY_IMPL;
+  if (!city || typeof city.cityView !== 'function') return NO;
+  // If the api can tell us there's no city here, skip cheaply.
+  if (typeof city.hasCity === 'function') {
+    try {
+      if (!city.hasCity(toId)) return NO;
+    } catch (_e) {
+      return NO;
+    }
+  }
+  let view;
+  try {
+    view = city.cityView(state, toId);
+  } catch (_e) {
+    return NO;
+  }
+  if (!view || !Array.isArray(view.buildings)) return NO;
+  let wallLevel = 0;
+  for (const b of view.buildings) {
+    if (b && b.id === 'walls') {
+      wallLevel = b.level | 0;
+      break;
+    }
+  }
+  if (wallLevel > 0) return { siege: true, wallLevel };
+  return NO;
+}
+
+// applyReward(state, faction, reward) -> state
+// Adds reward.{adena,wood,crystal} to the faction's treasury (clamped >= 0) and,
+// if reward.units ({ unitId:count }) is present, adds those units to the
+// faction's CAPITAL province garrison (falling back to its first owned province
+// when the capital isn't owned). Used by TD victories and campaign rewards.
+// Guarded against an unknown/eliminated faction and a missing capital.
+export function applyReward(state, faction, reward) {
+  if (!reward) return state;
+  const fac = state.factions[faction];
+  if (!fac) return state;
+
+  if (reward.adena) fac.adena = Math.max(0, (fac.adena | 0) + (reward.adena | 0));
+  if (reward.wood) fac.wood = Math.max(0, (fac.wood | 0) + (reward.wood | 0));
+  if (reward.crystal) fac.crystal = Math.max(0, (fac.crystal | 0) + (reward.crystal | 0));
+
+  if (reward.units && typeof reward.units === 'object') {
+    let placeId = FACTIONS[faction] && FACTIONS[faction].capital;
+    if (!placeId || !state.provinces[placeId] || state.provinces[placeId].owner !== faction) {
+      const owned = ownedBy(state, faction);
+      placeId = owned.length ? owned[0] : null;
+    }
+    if (placeId) {
+      const g = state.provinces[placeId].garrison;
+      for (const uid in reward.units) {
+        const n = reward.units[uid] | 0;
+        if (n > 0) g[uid] = (g[uid] | 0) + n;
+      }
+    }
+  }
+
+  pushLog(state, 'log.reward', {
+    faction,
+    adena: reward.adena | 0,
+    wood: reward.wood | 0,
+    crystal: reward.crystal | 0,
+  });
+  return state;
+}
+
 // planBattle(state, fromId, toId, units)
 //  -> { battle:false, state }  when the move is a reinforce/no-op (no fight)
 //  -> { battle:true, attacker, defender, terrain, fortified, rngState, from, to, units }
@@ -824,16 +1003,25 @@ export function planBattle(state, fromId, toId, units) {
   if (to.owner === from.owner) return { battle: false, state };
 
   const meta = PROV_BY_ID[toId];
+  // v4 hero bonus: the attacker side (hero at fromId) and defender side (hero at
+  // toId) carry a strength multiplier. The plan's attacker/defender garrisons are
+  // the battle INPUTS, so they are pre-scaled here exactly like the auto path in
+  // moveArmy — the manual battle/siege screen resolves on these scaled stacks, so
+  // heroes measurably shift the outcome. heroMul is also surfaced for the UI.
+  // Guarded to {1,1} -> byte-identical to v3 when no hero api is registered.
+  const attMul = heroMulFor(state, fromId).atkMul;
+  const defMul = heroMulFor(state, toId).defMul;
   return {
     battle: true,
-    attacker: { faction: from.owner, garrison: Object.assign({}, moving) },
-    defender: { faction: to.owner, garrison: Object.assign({}, to.garrison) },
+    attacker: { faction: from.owner, garrison: scaleGarrison(moving, attMul) },
+    defender: { faction: to.owner, garrison: scaleGarrison(to.garrison, defMul) },
     terrain: meta ? meta.terrain : 'plains',
     fortified: !!to.fortified,
     rngState: state.rngState,
     from: fromId,
     to: toId,
     units: Object.assign({}, moving),
+    heroMul: { atkMul: attMul, defMul: defMul },
   };
 }
 
