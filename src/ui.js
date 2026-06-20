@@ -56,6 +56,11 @@ const FALLBACK_STR = {
     'event.choose': 'Ваше решение',
     'event.result': 'Итог',
     'event.continue': 'Продолжить',
+    // v4: feature launchers (defense / heroes HUD button / campaign start choice)
+    'panel.defense': 'Оборона',
+    'panel.heroes': 'Герои',
+    'start.campaign': 'Поход',
+    'start.skirmish': 'Схватка',
   },
   en: {
     'app.title': 'Lineage II: Thrones of Aden',
@@ -102,12 +107,18 @@ const FALLBACK_STR = {
     'event.choose': 'Your decision',
     'event.result': 'Outcome',
     'event.continue': 'Continue',
+    // v4: feature launchers (defense / heroes HUD button / campaign start choice)
+    'panel.defense': 'Defense',
+    'panel.heroes': 'Heroes',
+    'start.campaign': 'Campaign',
+    'start.skirmish': 'Skirmish',
   },
 };
 
 export class UI {
   constructor({ renderer, engine, strings, camera, requestRedraw, centerOn,
-                canvas, ctx, battleUi, pauseLoop, resumeLoop, cityApi, openCity }) {
+                canvas, ctx, battleUi, pauseLoop, resumeLoop, cityApi, openCity,
+                openDefense, openSiege, openHeroes, openCampaign, heroApi, campaignApi }) {
     this.renderer = renderer;
     this.engine = engine;
     this.strings = strings;
@@ -126,6 +137,19 @@ export class UI {
     // every consumer is typeof-guarded so the map degrades to v2 when absent.
     this.cityApi = cityApi || null;
     this.openCity = (typeof openCity === 'function') ? openCity : null;
+
+    // v4 feature launchers + apis (all OPTIONAL). Every consumer is typeof-guarded
+    // so an absent feature simply hides its button and the v3 game is fully intact:
+    //  openDefense  -> wave-defense from an owned city ("Оборона" province button)
+    //  openSiege    -> city-siege screen (routes attacks at walled enemy cities)
+    //  openHeroes   -> hero roster screen ("Герои" HUD button)
+    //  openCampaign -> campaign scenario picker ("Поход" start-screen choice)
+    this.openDefense  = (typeof openDefense  === 'function') ? openDefense  : null;
+    this.openSiege    = (typeof openSiege    === 'function') ? openSiege    : null;
+    this.openHeroes   = (typeof openHeroes   === 'function') ? openHeroes   : null;
+    this.openCampaign = (typeof openCampaign === 'function') ? openCampaign : null;
+    this.heroApi = heroApi || null;        // { recruitHero, heroBattleBonus, gainHeroXp, heroAt, ... }
+    this.campaignApi = campaignApi || null; // { campaignList, startScenario, ... }
 
     this.W = 0; this.H = 0;
     this.state = null;             // engine State
@@ -147,6 +171,13 @@ export class UI {
     // v2 state
     this.battleBusy = false;       // true while a tactical battle owns the canvas
     this.cityBusy = false;         // v3: true while the city screen owns the canvas
+    // v4 busy flags: true while the matching feature screen owns the canvas. Map
+    // input/draw/endTurn are all suppressed while any of these is set (same as
+    // battleBusy/cityBusy) so the feature has exclusive use of the canvas.
+    this.defenseBusy = false;      // wave-defense screen open
+    this.siegeBusy = false;        // siege screen open
+    this.heroBusy = false;         // hero roster screen open
+    this.campaignBusy = false;     // campaign picker open
     this.skillsOpen = false;       // skills panel visibility
     this.startScroll = 0;          // faction-select vertical scroll offset
     this._startMaxScroll = 0;
@@ -166,6 +197,17 @@ export class UI {
   setCityHooks({ cityApi, openCity } = {}) {
     if (cityApi) this.cityApi = cityApi;
     if (typeof openCity === 'function') this.openCity = openCity;
+  }
+
+  // v4: wire the feature launchers + apis after construction if needed (mirrors
+  // setCityHooks). Each is optional; only assigns when a usable value is supplied.
+  setFeatureHooks({ openDefense, openSiege, openHeroes, openCampaign, heroApi, campaignApi } = {}) {
+    if (typeof openDefense  === 'function') this.openDefense  = openDefense;
+    if (typeof openSiege    === 'function') this.openSiege    = openSiege;
+    if (typeof openHeroes   === 'function') this.openHeroes   = openHeroes;
+    if (typeof openCampaign === 'function') this.openCampaign = openCampaign;
+    if (heroApi) this.heroApi = heroApi;
+    if (campaignApi) this.campaignApi = campaignApi;
   }
 
   async init() {
@@ -270,9 +312,14 @@ export class UI {
       music_city: 'assets/audio/music_city.mp3',         // calm town loop (city_ui)
       music_darkelf: 'assets/audio/music_darkelf.mp3',   // dark-elf map theme
       music_orc: 'assets/audio/music_orc.mp3',           // orc map theme
+      // v4 new tracks: wave-defense + siege loops (played while those screens own
+      // the canvas). Missing files never break playback.
+      music_defense: 'assets/audio/music_defense.mp3',   // wave-defense loop (td_ui)
+      music_siege: 'assets/audio/music_siege.mp3',       // siege loop (siege_ui)
     };
     // Which keys are looping background music (vs. one-shot sfx/stings).
-    const LOOPS = new Set(['theme', 'music_battle', 'music_city', 'music_darkelf', 'music_orc']);
+    const LOOPS = new Set(['theme', 'music_battle', 'music_city', 'music_darkelf',
+                           'music_orc', 'music_defense', 'music_siege']);
     for (const [k, src] of Object.entries(files)) {
       try {
         const a = new Audio();
@@ -352,11 +399,20 @@ export class UI {
   get hoverId() { return this._hoverId; }
   set hoverId(v) { this._hoverId = v; }
 
-  isModal() { return !!this.modal || this.battleBusy || this.cityBusy || this.screen !== 'play'; }
-  animating() { return this.screen === 'play' && !this.battleBusy && !this.cityBusy; } // glow pulse needs redraws on map
-  // True while the tactical battle OR the city screen owns the canvas; main.js
-  // skips its own map/HUD draw so it doesn't paint over their screens.
-  ownsCanvas() { return this.battleBusy || this.cityBusy; }
+  // v4: true while ANY feature screen (defense/siege/heroes/campaign) owns the
+  // canvas. Folded into the same guards as battleBusy/cityBusy below.
+  _featureBusy() {
+    return this.defenseBusy || this.siegeBusy || this.heroBusy || this.campaignBusy;
+  }
+  // True while any screen that takes over the canvas is active (battle, city, or a
+  // v4 feature). Used to suppress map input/draw/endTurn while a screen is up.
+  _screenBusy() { return this.battleBusy || this.cityBusy || this._featureBusy(); }
+
+  isModal() { return !!this.modal || this._screenBusy() || this.screen !== 'play'; }
+  animating() { return this.screen === 'play' && !this._screenBusy(); } // glow pulse needs redraws on map
+  // True while the tactical battle, the city screen, OR a v4 feature owns the
+  // canvas; main.js skips its own map/HUD draw so it doesn't paint over them.
+  ownsCanvas() { return this._screenBusy(); }
   update(dt) { this._anim += dt; return false; }
 
   // ---- command objects: the single entry to mutate game via engine ----
@@ -383,6 +439,10 @@ export class UI {
       case 'closeEvent':    return this._cmdCloseEvent();
       // v3: enter the city screen for the selected/owned province.
       case 'enterCity':     return this._enterCity(cmd.provId || this.selectedId);
+      // v4 feature launchers (each guarded; absent feature never reaches here).
+      case 'openDefense':   return this._openDefense(cmd.provId || this.selectedId);
+      case 'openHeroes':    return this._openHeroes();
+      case 'openCampaign':  return this._openCampaign();
       default: return;
     }
   }
@@ -413,7 +473,7 @@ export class UI {
   }
 
   _cmdMove(cmd) {
-    if (this.battleBusy || this.cityBusy) return;
+    if (this._screenBusy()) return;
     const { fromId, toId } = cmd;
     const fromProv = this.state.provinces[fromId];
     const units = (fromProv && fromProv.garrison) ? { ...fromProv.garrison } : {};
@@ -434,10 +494,32 @@ export class UI {
     return true;
   }
 
+  // v4: does this move resolve as a city SIEGE rather than an open-field battle?
+  // Asks engine.siegeInfo(state, from, to); siege only when it reports siege:true
+  // AND the siege screen (openSiege) actually exists. Guarded: any throw / absent
+  // helper -> false, so we fall through to the v2 tactical/auto path.
+  _siegeInfoFor(fromId, toId) {
+    if (!this.openSiege) return null;
+    if (!this.engine || typeof this.engine.siegeInfo !== 'function') return null;
+    try {
+      const info = this.engine.siegeInfo(this.state, fromId, toId);
+      return (info && info.siege === true) ? info : null;
+    } catch (e) { return null; }
+  }
+
   // Manual-battle move: plan -> (if battle) run tactical screen -> apply outcome.
   // Every external call is guarded; ANY failure degrades to _autoMove.
   async _runMove(fromId, toId, units) {
     const eng = this.engine;
+    // v4: route to a city siege first when the target is a walled enemy city and
+    // the siege feature is present. On any failure inside, we fall back to the
+    // normal tactical/auto path below (the siege helper restores busy state).
+    const siegeInfo = this._siegeInfoFor(fromId, toId);
+    if (siegeInfo) {
+      const handled = await this._runSiege(fromId, toId, units, siegeInfo);
+      if (handled) return; // siege owned the outcome (applied + refreshed)
+      // else: fall through to the tactical/auto path (siege couldn't run).
+    }
     // If planBattle / battle_ui / applyBattleOutcome aren't all present, go auto.
     const canPlan = eng && typeof eng.planBattle === 'function';
     const canApply = eng && typeof eng.applyBattleOutcome === 'function';
@@ -510,6 +592,114 @@ export class UI {
     this._afterAction();
   }
 
+  // v4: run a CITY SIEGE for an attack on a walled enemy city, then apply its
+  // outcome exactly like the tactical battle. Mirrors _runMove's pause/resume +
+  // try/catch precisely. Returns true if the siege handled the move (outcome
+  // applied), false to let the caller fall back to the tactical/auto path.
+  // siegeInfo = { siege:true, wallLevel } from engine.siegeInfo.
+  async _runSiege(fromId, toId, units, siegeInfo) {
+    const eng = this.engine;
+    const canApply = eng && typeof eng.applyBattleOutcome === 'function';
+    if (!this.openSiege || !canApply) return false;
+
+    // Derive the two sides. planBattle gives the cleanest attacker/defender shape
+    // (faction + garrison + terrain); if it's absent, derive from raw province data.
+    let attacker, defender, terrain;
+    if (typeof eng.planBattle === 'function') {
+      let plan = null;
+      try { plan = eng.planBattle(this.state, fromId, toId, units); }
+      catch (e) { plan = null; }
+      // planBattle reports no fight (own/empty target) -> not a real siege; bail
+      // to the normal path so the move still happens.
+      if (plan && plan.battle !== true) return false;
+      if (plan && plan.attacker && plan.defender) {
+        attacker = plan.attacker; defender = plan.defender; terrain = plan.terrain;
+      }
+    }
+    if (!attacker || !defender) {
+      const fromProv = this.state && this.state.provinces[fromId];
+      const toProv = this.state && this.state.provinces[toId];
+      if (!fromProv || !toProv) return false;
+      attacker = { faction: fromProv.owner, garrison: { ...(units || fromProv.garrison || {}) } };
+      defender = { faction: toProv.owner, garrison: { ...(toProv.garrison || {}) } };
+      const prdata = (PROVINCES || []).find(p => p.id === toId);
+      terrain = prdata ? prdata.terrain : undefined;
+    }
+
+    // ---- SIEGE owns the canvas. Pause the map loop (mirror the battle path). ----
+    this.siegeBusy = true;
+    this.modal = null;
+    let pausedOk = false;
+    try { this.pauseLoop(); pausedOk = true; } catch (e) { /* keep going */ }
+    this._play('sfx_battle');
+    // Swap the map theme for the siege loop while the siege screen is up.
+    const mapThemeKey = this._musicKey;
+    if (this._audio.music_siege) this._playMusic('music_siege');
+
+    let outcome = null;
+    try {
+      outcome = await this.openSiege({
+        canvas: this.canvas,
+        ctx: this.ctx,
+        attacker,
+        defender,
+        wallLevel: siegeInfo.wallLevel,
+        terrain,
+        seed: this.state && this.state.seed,
+        t: (key, params) => this.t(key, params),
+        assets: this.renderer && this.renderer.images,
+        lang: this.lang,
+        sound: { play: (k) => this._play(k), music: 'music_siege', on: this.audioOn },
+        requestRedraw: this.requestRedraw,
+      });
+    } catch (e) {
+      console.warn('[ui] openSiege threw -> fall back', e && e.message);
+      outcome = null;
+    } finally {
+      this.siegeBusy = false;
+      try { if (pausedOk) this.resumeLoop(); } catch (e) {}
+      this._playMusic(mapThemeKey || (this.state && this._factionThemeKey(this.state.playerFaction)));
+    }
+
+    // No outcome -> let the caller fall back (tactical/auto) so the move still resolves.
+    if (!outcome) return false;
+
+    try {
+      const res = eng.applyBattleOutcome(this.state, fromId, toId, units, outcome);
+      if (res && res.state) this.state = res.state;
+      this._showBattle(outcome);
+    } catch (e) {
+      console.warn('[ui] applyBattleOutcome (siege) failed -> fall back', e && e.message);
+      return false;
+    }
+
+    // v4: on a player win, grant hero XP for the ATTACKING province (if a hero
+    // leads it). Guarded; absent hero api -> no-op. The engine may also do this,
+    // so we only call when the helper is present and tolerate a throw.
+    const playerWon = outcome.winner === 'attacker'
+      && attacker && attacker.faction === this.state.playerFaction;
+    if (playerWon) this._grantHeroXp(fromId, 'siege');
+
+    this.selectedId = toId;
+    this._afterAction();
+    return true;
+  }
+
+  // v4: award hero XP for a province after a player win (siege/battle). Uses the
+  // engine facade's gainHeroXp (merged from heroes.js) if present; guarded so an
+  // absent api or a throw is a no-op. `reason` only tunes the amount.
+  _grantHeroXp(provId, reason) {
+    const fn = (this.engine && typeof this.engine.gainHeroXp === 'function') ? this.engine.gainHeroXp
+             : (this.heroApi && typeof this.heroApi.gainHeroXp === 'function') ? this.heroApi.gainHeroXp
+             : null;
+    if (!fn || !provId) return;
+    const amount = reason === 'siege' ? 25 : 20;
+    try {
+      const next = fn(this.state, provId, amount);
+      if (next) this.state = next;
+    } catch (e) { /* hero XP is best-effort; never block the map */ }
+  }
+
   _cmdRecruit(cmd) {
     if (!this.engine || typeof this.engine.recruit !== 'function') return;
     if (typeof this.engine.canRecruit === 'function') {
@@ -529,7 +719,7 @@ export class UI {
   }
 
   _cmdEndTurn() {
-    if (this.screen !== 'play' || this.modal || this.battleBusy || this.cityBusy) return;
+    if (this.screen !== 'play' || this.modal || this._screenBusy()) return;
     if (!this.engine || typeof this.engine.endTurn !== 'function') return;
     this.state = this.engine.endTurn(this.state) || this.state;
     this._afterAction();
@@ -629,7 +819,7 @@ export class UI {
   // try/catch: pause the map loop, hand the canvas to openCity, resume + refresh
   // on return. Any failure degrades gracefully (we just come back to the map).
   async _enterCity(provId) {
-    if (this.battleBusy || this.cityBusy) return;
+    if (this._screenBusy()) return;
     if (!this._canEnterCity(provId)) { this.requestRedraw(); return; }
     this.modal = null;
     this.cityBusy = true;
@@ -668,8 +858,162 @@ export class UI {
     }
   }
 
+  // ---- v4: wave defense ("Оборона") ------------------------------------
+  // Whether the Defense button should show for an owned-city province: the
+  // feature exists (openDefense) AND this is the player's own city province.
+  _canDefend(provId) {
+    if (!this.openDefense || !provId || !this.state) return false;
+    const prov = this.state.provinces[provId];
+    if (!prov || prov.owner !== this.state.playerFaction) return false;
+    return this._provinceHasCity(provId);
+  }
+
+  // Launch the wave-defense mini-game for an owned city. Mirrors _enterCity's
+  // pause/resume + try/catch. On a win, apply the reward via engine.applyReward.
+  async _openDefense(provId) {
+    if (this._screenBusy()) return;
+    if (!this._canDefend(provId)) { this.requestRedraw(); return; }
+    this.modal = null;
+    this.defenseBusy = true;
+    let pausedOk = false;
+    try { this.pauseLoop(); pausedOk = true; } catch (e) { /* keep going */ }
+    this._play('sfx_select');
+    const mapThemeKey = this._musicKey;
+    if (this._audio.music_defense) this._playMusic('music_defense');
+    const playerFaction = this.state.playerFaction;
+    let res = null;
+    try {
+      res = await this.openDefense({
+        canvas: this.canvas,
+        ctx: this.ctx,
+        faction: playerFaction,
+        provId,
+        seed: (this.state && this.state.seed) || this.seed,
+        assets: this.renderer && this.renderer.images,
+        t: (key, params) => this.t(key, params),
+        lang: this.lang,
+        sound: { play: (k) => this._play(k), music: 'music_defense', on: this.audioOn },
+        requestRedraw: this.requestRedraw,
+      });
+    } catch (e) {
+      console.warn('[ui] openDefense threw -> return to map', e && e.message);
+      res = null;
+    } finally {
+      this.defenseBusy = false;
+      try { if (pausedOk) this.resumeLoop(); } catch (e) {}
+      this._playMusic(mapThemeKey || (this.state && this._factionThemeKey(this.state.playerFaction)));
+    }
+    // On victory, grant the defense reward to the player faction via the engine.
+    if (res && res.result === 'win' && res.reward
+        && this.engine && typeof this.engine.applyReward === 'function') {
+      try {
+        const next = this.engine.applyReward(this.state, playerFaction, res.reward);
+        if (next) this.state = next;
+      } catch (e) { console.warn('[ui] applyReward failed', e && e.message); }
+    }
+    this._afterAction();
+  }
+
+  // ---- v4: heroes ("Герои") --------------------------------------------
+  // Whether the Heroes HUD button shows: the screen (openHeroes) + a hero api
+  // both exist. Absent either -> button hidden, no heroes feature.
+  _hasHeroes() {
+    return !!this.openHeroes && !!this.heroApi;
+  }
+
+  // Open the hero roster screen. Mirrors _enterCity's pause/resume + try/catch.
+  // hero_ui mutates state only through heroApi; onChange refreshes the map HUD.
+  async _openHeroes() {
+    if (this._screenBusy() || this.screen !== 'play') return;
+    if (!this._hasHeroes()) { this.requestRedraw(); return; }
+    this.modal = null;
+    this.heroBusy = true;
+    let pausedOk = false;
+    try { this.pauseLoop(); pausedOk = true; } catch (e) { /* keep going */ }
+    this._play('sfx_select');
+    const mapThemeKey = this._musicKey;
+    try {
+      await this.openHeroes({
+        canvas: this.canvas,
+        ctx: this.ctx,
+        state: this.state,
+        heroApi: this.heroApi,
+        t: (key, params) => this.t(key, params),
+        assets: this.renderer && this.renderer.images,
+        lang: this.lang,
+        sound: { play: (k) => this._play(k), on: this.audioOn },
+        requestRedraw: this.requestRedraw,
+        onChange: () => { this._refreshVM(); this.requestRedraw(); },
+      });
+    } catch (e) {
+      console.warn('[ui] openHeroes threw -> return to map', e && e.message);
+    } finally {
+      this.heroBusy = false;
+      try { if (pausedOk) this.resumeLoop(); } catch (e) {}
+      this._playMusic(mapThemeKey || (this.state && this._factionThemeKey(this.state.playerFaction)));
+      // Recruit/assign/equip may have changed resources/garrisons -> refresh.
+      this._afterAction();
+    }
+  }
+
+  // ---- v4: campaign ("Поход") ------------------------------------------
+  // Whether the Campaign start-screen choice shows: openCampaign exists. The
+  // campaign api is optional (the screen may carry its own list).
+  _hasCampaign() { return !!this.openCampaign; }
+
+  // Open the campaign scenario picker from the START screen. Resolves with
+  // {action:'start', config} -> feed config to engine.createGame and enter play;
+  // {action:'cancel'} (or anything else) -> return to the start screen.
+  async _openCampaign() {
+    if (this._screenBusy()) return;
+    if (!this._hasCampaign()) { this.requestRedraw(); return; }
+    this.campaignBusy = true;
+    let pausedOk = false;
+    try { this.pauseLoop(); pausedOk = true; } catch (e) { /* keep going */ }
+    this._play('sfx_select');
+    let res = null;
+    try {
+      res = await this.openCampaign({
+        canvas: this.canvas,
+        ctx: this.ctx,
+        campaign: this.campaignApi,
+        state: this.state,
+        t: (key, params) => this.t(key, params),
+        assets: this.renderer && this.renderer.images,
+        lang: this.lang,
+        sound: { play: (k) => this._play(k), on: this.audioOn },
+        requestRedraw: this.requestRedraw,
+      });
+    } catch (e) {
+      console.warn('[ui] openCampaign threw -> return to start', e && e.message);
+      res = null;
+    } finally {
+      this.campaignBusy = false;
+      try { if (pausedOk) this.resumeLoop(); } catch (e) {}
+    }
+    // {action:'start', config} -> create the game from the scenario config + play.
+    if (res && res.action === 'start' && res.config
+        && this.engine && typeof this.engine.createGame === 'function') {
+      try {
+        this.state = this.engine.createGame(res.config);
+        this.screen = 'play';
+        this.selectedId = null;
+        this.skillsOpen = false; this.skillTarget = null;
+        this._refreshVM();
+        const fac = (res.config && res.config.playerFaction) || this.startChoice;
+        this._centerOnCapital(fac);
+        this._playMusic(this._factionThemeKey(fac));
+      } catch (e) {
+        console.warn('[ui] createGame(campaign) failed -> start', e && e.message);
+        this.screen = 'start';
+      }
+    }
+    // else: {action:'cancel'}/null -> stay on the start screen.
+    this.requestRedraw();
+  }
+
   _cmdToggleSkills() {
-    if (this.screen !== 'play' || this.battleBusy || this.cityBusy) return;
+    if (this.screen !== 'play' || this._screenBusy()) return;
     if (!this._hasSkills()) { this.skillsOpen = false; this.requestRedraw(); return; }
     this.skillsOpen = !this.skillsOpen;
     this.skillTarget = null;
@@ -796,7 +1140,7 @@ export class UI {
     // Start screen: let the background become draggable so the card grid scrolls.
     if (this.screen === 'start') return this._startMaxScroll <= 0;
     if (this.screen === 'over') return true; // game-over: swallow background drags
-    if (this.modal || this.battleBusy || this.cityBusy) return true; // swallow world drags under a modal/battle/city
+    if (this.modal || this._screenBusy()) return true; // swallow world drags under a modal/battle/city/feature
     if (this.skillsOpen) return true; // swallow background taps under the skills panel
     return false;
   }
@@ -828,7 +1172,7 @@ export class UI {
 
   // World tap (called only when not consumed by HUD and gesture was a tap).
   onTap(p) {
-    if (this.screen !== 'play' || this.modal || this.battleBusy || this.cityBusy) return;
+    if (this.screen !== 'play' || this.modal || this._screenBusy()) return;
     const provId = this.renderer.pickProvince(p.x, p.y, this.camera);
 
     // Skill target-pick mode: the tap chooses the skill's target province.
@@ -900,11 +1244,11 @@ export class UI {
   draw(ctx, W, H) {
     this.W = W; this.H = H;
     this.buttons = [];
+    // While the tactical battle, the city screen, or a v4 feature owns the canvas,
+    // draw no HUD (each has its own). main.js also skips its draw via ownsCanvas();
+    // this guard covers the start screen too (the campaign picker runs from there).
+    if (this._screenBusy()) return;
     if (this.screen === 'start') { this._drawStart(ctx, W, H); return; }
-
-    // While the tactical battle or the city screen owns the canvas, draw no HUD
-    // (each has its own). main.js also skips its draw via ownsCanvas().
-    if (this.battleBusy || this.cityBusy) return;
 
     this._drawTopBar(ctx, W, H);
     this._drawToolbar(ctx, W, H);
@@ -913,6 +1257,7 @@ export class UI {
       else if (this.selectedId) this._drawActionPanel(ctx, W, H);
       this._drawEndTurn(ctx, W, H);
       this._drawSkillsButton(ctx, W, H);
+      this._drawHeroesButton(ctx, W, H);
       if (this.skillsOpen) this._drawSkillsPanel(ctx, W, H);
     }
     if (this.modal) {
@@ -1045,11 +1390,30 @@ export class UI {
       ctx.textAlign = 'start';
     }
 
-    // Begin button
-    const bw = Math.min(220, W * 0.6), bh = beginH;
-    this._btn(ctx, 'begin', (W - bw) / 2, H * 0.86 - bh, bw, bh, this.t('start.begin'),
-      { type: 'startGame', faction: this.startChoice },
-      { fill: 'rgba(59,111,212,0.85)', color: '#fff', stroke: PALETTE.gold });
+    // Begin (skirmish) button, plus a v4 "Поход" (Campaign) button beside it when
+    // the campaign feature is present. Both sit on the same row, centered.
+    const bh = beginH;
+    const by = H * 0.86 - bh;
+    if (this._hasCampaign()) {
+      const totalW = Math.min(360, W * 0.86);
+      const gap2 = 12;
+      const bw = (totalW - gap2) / 2;
+      const x0 = (W - totalW) / 2;
+      // Skirmish (the v3 quick-start). Keep the 'begin' id + startGame cmd so the
+      // existing flow is byte-for-byte preserved; label falls back to start.begin.
+      this._btn(ctx, 'begin', x0, by, bw, bh, this.t('start.skirmish'),
+        { type: 'startGame', faction: this.startChoice },
+        { fill: 'rgba(59,111,212,0.85)', color: '#fff', stroke: PALETTE.gold });
+      // Campaign -> the scenario picker (own canvas), resolves to createGame/cancel.
+      this._btn(ctx, 'campaign', x0 + bw + gap2, by, bw, bh, this.t('start.campaign'),
+        { type: 'openCampaign' },
+        { fill: 'rgba(125,63,176,0.9)', color: PALETTE.gold, stroke: PALETTE.bronzeLight });
+    } else {
+      const bw = Math.min(220, W * 0.6);
+      this._btn(ctx, 'begin', (W - bw) / 2, by, bw, bh, this.t('start.begin'),
+        { type: 'startGame', faction: this.startChoice },
+        { fill: 'rgba(59,111,212,0.85)', color: '#fff', stroke: PALETTE.gold });
+    }
 
     // lang + audio toggles
     this._drawToolbar(ctx, W, H);
@@ -1194,20 +1558,37 @@ export class UI {
     }
     if (col !== 0) by += bh + 6;
 
-    // Fortify (+ Enter city, if this owned province has a city) + move hint row.
+    // Bottom action row: Fortify, plus (if present) Enter city and v4 Defense.
+    // Buttons are laid out evenly across the row; the move hint drops to its own
+    // line when any extra button is shown, else shares the row with Fortify.
     const fy = y + panelH - 38;
     const canEnter = this._canEnterCity(this.selectedId);
+    const canDefend = this._canDefend(this.selectedId);
     const fortLabel = this.t('panel.fortify') + (prov.fortified ? ' ✓' : '');
-    if (canEnter) {
-      // Split the row: Fortify | Enter city. Move hint drops to its own line.
-      const halfW = (w - 24 - 8) / 2;
-      this._btn(ctx, 'fortify', x + 12, fy, halfW, 30, fortLabel,
-        { type: 'fortify', provId: this.selectedId }, { r: 6, font: 'bold 12px sans-serif' });
-      this._btn(ctx, 'enterCity', x + 12 + halfW + 8, fy, halfW, 30, this.t('panel.enterCity'),
-        { type: 'enterCity', provId: this.selectedId },
-        { r: 6, font: 'bold 12px sans-serif', fill: 'rgba(59,111,212,0.85)',
-          color: '#fff', stroke: PALETTE.gold });
+    // Collect the actions for this owned province (Fortify is always present).
+    const actions = [{ id: 'fortify', label: fortLabel,
+      cmd: { type: 'fortify', provId: this.selectedId },
+      opts: { r: 6, font: 'bold 12px sans-serif' } }];
+    if (canEnter) actions.push({ id: 'enterCity', label: this.t('panel.enterCity'),
+      cmd: { type: 'enterCity', provId: this.selectedId },
+      opts: { r: 6, font: 'bold 12px sans-serif', fill: 'rgba(59,111,212,0.85)',
+              color: '#fff', stroke: PALETTE.gold } });
+    if (canDefend) actions.push({ id: 'openDefense', label: this.t('panel.defense'),
+      cmd: { type: 'openDefense', provId: this.selectedId },
+      opts: { r: 6, font: 'bold 12px sans-serif', fill: 'rgba(125,63,176,0.9)',
+              color: PALETTE.gold, stroke: PALETTE.bronzeLight } });
+    if (actions.length > 1) {
+      // Even split across the full row. Move hint drops to its own line above.
+      const n = actions.length;
+      const gap2 = 8;
+      const bwn = (w - 24 - (n - 1) * gap2) / n;
+      let bxn = x + 12;
+      for (const a of actions) {
+        this._btn(ctx, a.id, bxn, fy, bwn, 30, a.label, a.cmd, a.opts);
+        bxn += bwn + gap2;
+      }
     } else {
+      // Lone Fortify + the move hint share the row (v3 layout).
       this._btn(ctx, 'fortify', x + 12, fy, (w - 24) * 0.4, 30, fortLabel,
         { type: 'fortify', provId: this.selectedId }, { r: 6, font: 'bold 12px sans-serif' });
       ctx.fillStyle = PALETTE.gold; ctx.font = '11px sans-serif';
@@ -1238,6 +1619,19 @@ export class UI {
       { type: 'toggleSkills' },
       { fill: this.skillsOpen ? 'rgba(125,63,176,0.9)' : 'rgba(20,18,12,0.9)',
         color: PALETTE.gold, stroke: PALETTE.bronzeLight, r: 8 });
+  }
+
+  // ---- v4: Heroes HUD button (hidden when the heroes feature is absent) ----
+  // Stacks above the skills button if it's showing, else above end-turn. Mirrors
+  // the skills-button placement so the right-edge button column reads cleanly.
+  _drawHeroesButton(ctx, W, H) {
+    if (!this._hasHeroes()) return; // gracefully hide if no heroes feature
+    const bw = 110, bh = 38;
+    const rows = this._hasSkills() ? 2 : 1;     // how many buttons already stacked
+    const x = W - bw - 8, y = H - bh - 8 - rows * (38 + 8);
+    this._btn(ctx, 'heroes', x, y, bw, bh, this.t('panel.heroes'),
+      { type: 'openHeroes' },
+      { fill: 'rgba(20,18,12,0.9)', color: PALETTE.gold, stroke: PALETTE.bronzeLight, r: 8 });
   }
 
   // ---- v2: Skills panel: lists skillStatus() with cost/cooldown/ready ----

@@ -11,6 +11,11 @@ import { UI } from './ui.js';
 let engine = null, strings = null, battleUi = null;
 let eventsMod = null, skillsMod = null;   // event/skill engines (own modules)
 let cityMod = null, cityUiMod = null;     // v3: city engine (city.js) + city screen (city_ui.js)
+// v4 feature modules (all optional; absent -> the feature button hides, base game intact).
+let tdMod = null, tdUiMod = null;         // wave defense: sim (td.js) + screen (td_ui.js)
+let siegeMod = null, siegeUiMod = null;   // city sieges: model (siege.js) + screen (siege_ui.js)
+let heroesMod = null, heroUiMod = null;   // heroes: engine (heroes.js) + roster screen (hero_ui.js)
+let campaignMod = null, campaignUiMod = null; // campaign: logic (campaign.js) + screen (campaign_ui.js)
 let dataReady = false;
 
 // Try a side-effect registration import; never let a missing sibling crash boot.
@@ -75,6 +80,24 @@ async function loadModules() {
     console.warn('[main] city_ui.js not available yet:', e.message);
     cityUiMod = null;
   }
+
+  // ---- v4 feature modules (all OPTIONAL; mirror the v2/v3 resilient pattern) ----
+  // Heroes engine registers via registerHeroes(engine) (like registerCity) so the
+  // engine's planBattle can read hero bonuses; AWAIT it so registration completes
+  // before the first battle. Its query/mutation fns are merged onto the facade below.
+  heroesMod = await tryRegister('./heroes.js', ['registerHeroes', 'register', 'default']);
+  // The sim/model modules (td.js, siege.js) have no register hook — they're consumed
+  // by their UIs, but we import them so a missing core degrades the whole feature.
+  try { tdMod = await import('./td.js'); } catch (e) { tdMod = null; }
+  try { siegeMod = await import('./siege.js'); } catch (e) { siegeMod = null; }
+  // campaign.js exposes the list/start/check helpers the map client feeds to the UI.
+  try { campaignMod = await import('./campaign.js'); } catch (e) { campaignMod = null; }
+  // v4 feature SCREENS (each owns the canvas while open, exactly like battle_ui/city_ui).
+  try { tdUiMod = await import('./td_ui.js'); } catch (e) { tdUiMod = null; }
+  try { siegeUiMod = await import('./siege_ui.js'); } catch (e) { siegeUiMod = null; }
+  try { heroUiMod = await import('./hero_ui.js'); } catch (e) { heroUiMod = null; }
+  try { campaignUiMod = await import('./campaign_ui.js'); } catch (e) { campaignUiMod = null; }
+
   dataReady = true;
 }
 
@@ -347,6 +370,19 @@ async function boot() {
   // typeof-guards hide the "Enter city" button (game degrades to v2).
   if (cityMod) for (const k of ['hasCity', 'cityView', 'canBuild', 'startBuild', 'ensureCity'])
     if (typeof cityMod[k] === 'function') engineApi[k] = cityMod[k];
+  // v4: merge the heroes engine fns onto the same facade so the UI / engine can
+  // call them as engine.recruitHero / engine.heroBattleBonus / engine.gainHeroXp /
+  // engine.heroAt / etc. Absent heroes.js -> these stay undefined and the UI's
+  // typeof-guards hide the "Герои" button + the hero pennant + the on-win XP grant.
+  const HERO_FNS = ['recruitHero', 'assignHero', 'equipItem', 'grantItem', 'heroAt',
+                    'heroBattleBonus', 'gainHeroXp', 'heroesRoster'];
+  if (heroesMod) for (const k of HERO_FNS)
+    if (typeof heroesMod[k] === 'function') engineApi[k] = heroesMod[k];
+  // v4: merge the engine-v4 helpers (siegeInfo, applyReward). These live on
+  // engine.js itself (feat/engine-v4); Object.assign already copied them, but we
+  // re-assert from the engine namespace for clarity + so a late-bound export wins.
+  if (engine) for (const k of ['siegeInfo', 'applyReward'])
+    if (typeof engine[k] === 'function') engineApi[k] = engine[k];
   engine = engineApi;
   // Build a stand-alone city api object (the subset openCity expects as `city`),
   // sourced from the merged facade so it tracks whatever city.js actually exports.
@@ -356,6 +392,32 @@ async function boot() {
   const hasCityApi = typeof cityApi.hasCity === 'function';
   const openCity = (cityUiMod && typeof cityUiMod.openCity === 'function')
     ? cityUiMod.openCity : null;
+
+  // ---- v4: stand-alone hero api (the subset openHeroes expects as `heroApi`),
+  // sourced from the merged facade so it tracks whatever heroes.js actually exports.
+  // The hero_ui mutates state ONLY through these fns.
+  const heroApi = {};
+  for (const k of HERO_FNS) if (typeof engine[k] === 'function') heroApi[k] = engine[k];
+  const hasHeroApi = typeof heroApi.heroBattleBonus === 'function'
+                  || typeof heroApi.heroesRoster === 'function'
+                  || typeof heroApi.recruitHero === 'function';
+  // v4: campaign api (list/start/check/complete) for the campaign screen.
+  const campaignApi = {};
+  if (campaignMod) for (const k of ['campaignList', 'startScenario', 'checkObjective', 'completeScenario'])
+    if (typeof campaignMod[k] === 'function') campaignApi[k] = campaignMod[k];
+
+  // ---- v4: the four feature entry points. Each may be null on an isolated
+  // branch; the UI typeof-guards every one so the matching button stays hidden
+  // and the base v3 game is fully intact when a feature is absent.
+  const openDefense = (tdUiMod && typeof tdUiMod.openDefense === 'function')
+    ? tdUiMod.openDefense : null;
+  const openSiege = (siegeUiMod && typeof siegeUiMod.openSiege === 'function')
+    ? siegeUiMod.openSiege : null;
+  const openHeroes = (heroUiMod && typeof heroUiMod.openHeroes === 'function')
+    ? heroUiMod.openHeroes : null;
+  const openCampaign = (campaignUiMod && typeof campaignUiMod.openCampaign === 'function')
+    ? campaignUiMod.openCampaign : null;
+
   renderer = new Renderer(canvas);
   ui = new UI({
     renderer,
@@ -370,6 +432,14 @@ async function boot() {
     // "Enter city" button only appears when city.hasCity + openCity both exist.
     cityApi: hasCityApi ? cityApi : null,
     openCity,
+    // v4 feature wiring: the four launchers + the hero/campaign apis. All may be
+    // null; the UI guards each (typeof) so absent features hide their buttons.
+    openDefense,
+    openSiege,
+    openHeroes,
+    openCampaign,
+    heroApi: hasHeroApi ? heroApi : null,
+    campaignApi: Object.keys(campaignApi).length ? campaignApi : null,
     requestRedraw: () => { needsRedraw = true; },
     centerOn: (worldX, worldY) => { centerCamera(worldX, worldY); },
     // Hand the canvas + loop to the tactical battle screen, then take it back.
@@ -388,6 +458,11 @@ async function boot() {
   // own capital/castle derivation and never crashes.
   if (renderer && typeof renderer.setCityPredicate === 'function') {
     renderer.setCityPredicate(typeof cityApi.hasCity === 'function' ? cityApi.hasCity : null);
+  }
+  // v4: give the renderer the heroAt predicate so it can draw a hero pennant on
+  // provinces with an assigned hero. Guarded; absent -> no pennant, base map intact.
+  if (renderer && typeof renderer.setHeroPredicate === 'function') {
+    renderer.setHeroPredicate(typeof heroApi.heroAt === 'function' ? heroApi.heroAt : null);
   }
   await renderer.loadAssets();
   await ui.init();
