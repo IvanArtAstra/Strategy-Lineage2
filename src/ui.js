@@ -18,6 +18,9 @@ const FALLBACK_STR = {
     'hud.turn': 'Ход',
     'hud.adena': 'Адена',
     'hud.endTurn': 'Конец хода',
+    // v3: multi-resource HUD + enter-city
+    'res.adena': 'Адена', 'res.wood': 'Древесина', 'res.crystal': 'Кристаллы',
+    'panel.enterCity': 'Войти в город',
     'panel.recruit': 'Нанять',
     'panel.fortify': 'Укрепить',
     'panel.move': 'Нажмите соседнюю провинцию для перемещения/атаки',
@@ -61,6 +64,9 @@ const FALLBACK_STR = {
     'hud.turn': 'Turn',
     'hud.adena': 'Adena',
     'hud.endTurn': 'End Turn',
+    // v3: multi-resource HUD + enter-city
+    'res.adena': 'Adena', 'res.wood': 'Wood', 'res.crystal': 'Crystal',
+    'panel.enterCity': 'Enter city',
     'panel.recruit': 'Recruit',
     'panel.fortify': 'Fortify',
     'panel.move': 'Tap an adjacent province to move / attack',
@@ -101,7 +107,7 @@ const FALLBACK_STR = {
 
 export class UI {
   constructor({ renderer, engine, strings, camera, requestRedraw, centerOn,
-                canvas, ctx, battleUi, pauseLoop, resumeLoop }) {
+                canvas, ctx, battleUi, pauseLoop, resumeLoop, cityApi, openCity }) {
     this.renderer = renderer;
     this.engine = engine;
     this.strings = strings;
@@ -115,6 +121,11 @@ export class UI {
     this.battleUi = battleUi || null;        // module namespace with runTacticalBattle
     this.pauseLoop = pauseLoop || (() => {}); // hand the canvas to the battle screen
     this.resumeLoop = resumeLoop || (() => {});
+    // v3 city screen: api subset { hasCity, cityView, canBuild, startBuild,
+    // ensureCity } + openCity entry-point. Both may be null on isolated branches;
+    // every consumer is typeof-guarded so the map degrades to v2 when absent.
+    this.cityApi = cityApi || null;
+    this.openCity = (typeof openCity === 'function') ? openCity : null;
 
     this.W = 0; this.H = 0;
     this.state = null;             // engine State
@@ -135,6 +146,7 @@ export class UI {
 
     // v2 state
     this.battleBusy = false;       // true while a tactical battle owns the canvas
+    this.cityBusy = false;         // v3: true while the city screen owns the canvas
     this.skillsOpen = false;       // skills panel visibility
     this.startScroll = 0;          // faction-select vertical scroll offset
     this._startMaxScroll = 0;
@@ -148,6 +160,12 @@ export class UI {
     if (battleUi) this.battleUi = battleUi;
     if (pauseLoop) this.pauseLoop = pauseLoop;
     if (resumeLoop) this.resumeLoop = resumeLoop;
+  }
+
+  // v3: wire the city screen (api + openCity) after construction if needed.
+  setCityHooks({ cityApi, openCity } = {}) {
+    if (cityApi) this.cityApi = cityApi;
+    if (typeof openCity === 'function') this.openCity = openCity;
   }
 
   async init() {
@@ -245,17 +263,28 @@ export class UI {
       sfx_select: 'assets/audio/sfx_select.mp3',
       sfx_battle: 'assets/audio/sfx_battle.mp3',
       sfx_victory: 'assets/audio/sfx_victory.mp3',
+      // v3 new tracks (orchestrator places them under assets/audio/). Missing
+      // files never break playback — the Audio element just fails to play.
+      music_battle: 'assets/audio/music_battle.mp3',     // tactical battle loop
+      music_victory: 'assets/audio/music_victory.mp3',   // win screen sting
+      music_city: 'assets/audio/music_city.mp3',         // calm town loop (city_ui)
+      music_darkelf: 'assets/audio/music_darkelf.mp3',   // dark-elf map theme
+      music_orc: 'assets/audio/music_orc.mp3',           // orc map theme
     };
+    // Which keys are looping background music (vs. one-shot sfx/stings).
+    const LOOPS = new Set(['theme', 'music_battle', 'music_city', 'music_darkelf', 'music_orc']);
     for (const [k, src] of Object.entries(files)) {
       try {
         const a = new Audio();
         a.src = src;
         a.preload = 'none';
-        if (k === 'theme') { a.loop = true; a.volume = 0.4; }
+        if (LOOPS.has(k)) { a.loop = true; a.volume = 0.4; }
         else a.volume = 0.6;
         this._audio[k] = a;
       } catch (e) { /* ignore missing audio */ }
     }
+    // Track which looping music is currently playing so we can crossfade/stop it.
+    this._musicKey = null;
   }
 
   _play(key) {
@@ -269,10 +298,42 @@ export class UI {
     } catch (e) { /* ignore */ }
   }
 
+  // Pick the looping map theme for a faction (v3 §9): darkelf/orc get their own,
+  // everyone else falls back to the default theme.mp3. Returns a key into _audio.
+  _factionThemeKey(faction) {
+    if (faction === 'darkelf' && this._audio.music_darkelf) return 'music_darkelf';
+    if (faction === 'orc' && this._audio.music_orc) return 'music_orc';
+    return 'theme';
+  }
+
+  // Switch the currently-playing looping background music to `key` (or stop, if
+  // key is null). Resilient: honors the audio toggle, never throws on missing
+  // files. Used for the map theme, battle/city music, etc.
+  _playMusic(key) {
+    // Stop the previous loop if it differs from the requested one.
+    if (this._musicKey && this._musicKey !== key) {
+      try { const prev = this._audio[this._musicKey]; if (prev) prev.pause(); } catch (e) {}
+    }
+    this._musicKey = key || null;
+    if (!key || !this.audioOn) return;
+    const a = this._audio[key];
+    if (!a) return;
+    try { const p = a.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+  }
+
   toggleAudio() {
     this.audioOn = !this.audioOn;
-    if (this.audioOn) this._play('theme');
-    else { try { this._audio.theme && this._audio.theme.pause(); } catch (e) {} }
+    if (this.audioOn) {
+      // Resume whatever looping track is contextually active: the current music
+      // key if one was selected (e.g. the faction map theme), else default theme.
+      this._playMusic(this._musicKey || 'theme');
+    } else {
+      // Mute: pause the active looping music (whichever it is).
+      try {
+        const a = this._musicKey && this._audio[this._musicKey];
+        if (a) a.pause(); else if (this._audio.theme) this._audio.theme.pause();
+      } catch (e) {}
+    }
     this.requestRedraw();
   }
 
@@ -291,10 +352,11 @@ export class UI {
   get hoverId() { return this._hoverId; }
   set hoverId(v) { this._hoverId = v; }
 
-  isModal() { return !!this.modal || this.battleBusy || this.screen !== 'play'; }
-  animating() { return this.screen === 'play' && !this.battleBusy; } // glow pulse needs redraws on map
-  // True while the tactical battle module owns the canvas; main.js skips its own draw.
-  ownsCanvas() { return this.battleBusy; }
+  isModal() { return !!this.modal || this.battleBusy || this.cityBusy || this.screen !== 'play'; }
+  animating() { return this.screen === 'play' && !this.battleBusy && !this.cityBusy; } // glow pulse needs redraws on map
+  // True while the tactical battle OR the city screen owns the canvas; main.js
+  // skips its own map/HUD draw so it doesn't paint over their screens.
+  ownsCanvas() { return this.battleBusy || this.cityBusy; }
   update(dt) { this._anim += dt; return false; }
 
   // ---- command objects: the single entry to mutate game via engine ----
@@ -319,6 +381,8 @@ export class UI {
       case 'cancelSkill':   this.skillTarget = null; this.requestRedraw(); return;
       case 'resolveEvent':  return this._cmdResolveEvent(cmd);
       case 'closeEvent':    return this._cmdCloseEvent();
+      // v3: enter the city screen for the selected/owned province.
+      case 'enterCity':     return this._enterCity(cmd.provId || this.selectedId);
       default: return;
     }
   }
@@ -335,6 +399,9 @@ export class UI {
     this._refreshVM();
     this._centerOnCapital(fac);
     this._play('sfx_select');
+    // v3 audio §9: start the faction map theme (darkelf/orc -> their own track,
+    // else default theme.mp3). Resilient + honors the audio toggle.
+    this._playMusic(this._factionThemeKey(fac));
     this.requestRedraw();
   }
 
@@ -346,7 +413,7 @@ export class UI {
   }
 
   _cmdMove(cmd) {
-    if (this.battleBusy) return;
+    if (this.battleBusy || this.cityBusy) return;
     const { fromId, toId } = cmd;
     const fromProv = this.state.provinces[fromId];
     const units = (fromProv && fromProv.garrison) ? { ...fromProv.garrison } : {};
@@ -394,6 +461,10 @@ export class UI {
     let pausedOk = false;
     try { this.pauseLoop(); pausedOk = true; } catch (e) { /* keep going */ }
     this._play('sfx_battle');
+    // v3 audio §9: swap the map theme for the tense battle loop while the
+    // tactical screen owns the canvas. Remember the map theme to restore after.
+    const mapThemeKey = this._musicKey;
+    if (this._audio.music_battle) this._playMusic('music_battle');
 
     let outcome = null;
     try {
@@ -409,7 +480,9 @@ export class UI {
         t: (key, params) => this.t(key, params),
         assets: this.renderer && this.renderer.images,
         lang: this.lang,
-        sound: { play: (k) => this._play(k), on: this.audioOn },
+        // sound hook (v3 §9): expose sfx + the music_battle loop so the battle
+        // screen can drive its own audio if it wants; .music carries the key.
+        sound: { play: (k) => this._play(k), music: 'music_battle', on: this.audioOn },
       });
     } catch (e) {
       console.warn('[ui] runTacticalBattle threw -> auto-resolve', e && e.message);
@@ -417,6 +490,8 @@ export class UI {
     } finally {
       this.battleBusy = false;
       try { if (pausedOk) this.resumeLoop(); } catch (e) {}
+      // Restore the map theme that was playing before the battle (if any).
+      this._playMusic(mapThemeKey || (this.state && this._factionThemeKey(this.state.playerFaction)));
     }
 
     if (!outcome) { this._autoMove(fromId, toId, units); return; }
@@ -454,7 +529,7 @@ export class UI {
   }
 
   _cmdEndTurn() {
-    if (this.screen !== 'play' || this.modal || this.battleBusy) return;
+    if (this.screen !== 'play' || this.modal || this.battleBusy || this.cityBusy) return;
     if (!this.engine || typeof this.engine.endTurn !== 'function') return;
     this.state = this.engine.endTurn(this.state) || this.state;
     this._afterAction();
@@ -518,8 +593,83 @@ export class UI {
   // Whether the skills feature exists at all (drives the HUD button visibility).
   _hasSkills() { return this._skillStatus().length > 0; }
 
+  // ---- v3: cities --------------------------------------------------------
+  // The province `provId` has a city, per the city engine. Guard every call:
+  // prefer the engine facade (engine.hasCity), fall back to the city api subset.
+  // Absent api / throw -> false (no "Enter city" button; map plays as v2).
+  _provinceHasCity(provId) {
+    if (!provId) return false;
+    const fn = (this.engine && typeof this.engine.hasCity === 'function') ? this.engine.hasCity
+             : (this.cityApi && typeof this.cityApi.hasCity === 'function') ? this.cityApi.hasCity
+             : null;
+    if (!fn) return false;
+    try { return !!fn(provId); } catch (e) { return false; }
+  }
+
+  // Whether the city screen can actually be opened (openCity present + a usable
+  // city api). Drives the "Enter city" button visibility in the province panel.
+  _canEnterCity(provId) {
+    if (!this.openCity) return false;
+    if (!this._provinceHasCity(provId)) return false;
+    return true;
+  }
+
+  // Build the city api object passed as openCity's `city` opt. Prefer the
+  // explicit cityApi; otherwise harvest the fns off the engine facade.
+  _cityApiObj() {
+    if (this.cityApi) return this.cityApi;
+    const src = this.engine || {};
+    const out = {};
+    for (const k of ['hasCity', 'cityView', 'canBuild', 'startBuild', 'ensureCity'])
+      if (typeof src[k] === 'function') out[k] = src[k];
+    return out;
+  }
+
+  // Open the city screen for `provId`. Mirrors the manual-battle pause/resume +
+  // try/catch: pause the map loop, hand the canvas to openCity, resume + refresh
+  // on return. Any failure degrades gracefully (we just come back to the map).
+  async _enterCity(provId) {
+    if (this.battleBusy || this.cityBusy) return;
+    if (!this._canEnterCity(provId)) { this.requestRedraw(); return; }
+    this.modal = null;
+    this.cityBusy = true;
+    let pausedOk = false;
+    try { this.pauseLoop(); pausedOk = true; } catch (e) { /* keep going */ }
+    this._play('sfx_select');
+    // v3 audio §9: city_ui plays music_city itself via opts.sound; we just swap
+    // away the map theme so they don't overlap, and restore it on return.
+    const mapThemeKey = this._musicKey;
+    if (this._audio.music_city) this._playMusic('music_city');
+    try {
+      await this.openCity({
+        canvas: this.canvas,
+        ctx: this.ctx,
+        state: this.state,
+        provId,
+        city: this._cityApiObj(),
+        t: (key, params) => this.t(key, params),
+        assets: this.renderer && this.renderer.images,
+        lang: this.lang,
+        sound: { play: (k) => this._play(k), music: 'music_city', on: this.audioOn },
+        requestRedraw: this.requestRedraw,
+        // city_ui mutates state only through the city api; onChange lets it ask
+        // the map HUD to refresh (resources/garrisons may have changed).
+        onChange: () => { this._refreshVM(); this.requestRedraw(); },
+      });
+    } catch (e) {
+      console.warn('[ui] openCity threw -> return to map', e && e.message);
+    } finally {
+      this.cityBusy = false;
+      try { if (pausedOk) this.resumeLoop(); } catch (e) {}
+      // Restore the map theme that was playing before entering the city.
+      this._playMusic(mapThemeKey || (this.state && this._factionThemeKey(this.state.playerFaction)));
+      // City production/builds may have changed resources/garrisons -> refresh.
+      this._afterAction();
+    }
+  }
+
   _cmdToggleSkills() {
-    if (this.screen !== 'play' || this.battleBusy) return;
+    if (this.screen !== 'play' || this.battleBusy || this.cityBusy) return;
     if (!this._hasSkills()) { this.skillsOpen = false; this.requestRedraw(); return; }
     this.skillsOpen = !this.skillsOpen;
     this.skillTarget = null;
@@ -597,7 +747,12 @@ export class UI {
     if (result && result.winner) {
       this.state.result = result;
       this.screen = 'over';
-      this._play(result.winner === this.state.playerFaction ? 'sfx_victory' : 'sfx_battle');
+      const won = result.winner === this.state.playerFaction;
+      this._play(won ? 'sfx_victory' : 'sfx_battle');
+      // v3 audio §9: triumphant track on the win screen (the loop on it makes a
+      // calm victory bed). On a loss, just stop the map theme.
+      if (won && this._audio.music_victory) this._playMusic('music_victory');
+      else this._playMusic(null);
       this.requestRedraw();
     }
   }
@@ -641,7 +796,7 @@ export class UI {
     // Start screen: let the background become draggable so the card grid scrolls.
     if (this.screen === 'start') return this._startMaxScroll <= 0;
     if (this.screen === 'over') return true; // game-over: swallow background drags
-    if (this.modal || this.battleBusy) return true; // swallow world drags under a modal/battle
+    if (this.modal || this.battleBusy || this.cityBusy) return true; // swallow world drags under a modal/battle/city
     if (this.skillsOpen) return true; // swallow background taps under the skills panel
     return false;
   }
@@ -673,7 +828,7 @@ export class UI {
 
   // World tap (called only when not consumed by HUD and gesture was a tap).
   onTap(p) {
-    if (this.screen !== 'play' || this.modal || this.battleBusy) return;
+    if (this.screen !== 'play' || this.modal || this.battleBusy || this.cityBusy) return;
     const provId = this.renderer.pickProvince(p.x, p.y, this.camera);
 
     // Skill target-pick mode: the tap chooses the skill's target province.
@@ -747,8 +902,9 @@ export class UI {
     this.buttons = [];
     if (this.screen === 'start') { this._drawStart(ctx, W, H); return; }
 
-    // While the tactical battle owns the canvas, draw no HUD (it has its own).
-    if (this.battleBusy) return;
+    // While the tactical battle or the city screen owns the canvas, draw no HUD
+    // (each has its own). main.js also skips its draw via ownsCanvas().
+    if (this.battleBusy || this.cityBusy) return;
 
     this._drawTopBar(ctx, W, H);
     this._drawToolbar(ctx, W, H);
@@ -915,13 +1071,45 @@ export class UI {
     ctx.textBaseline = 'middle';
     ctx.fillText(this.t(fac.nameKey || ('fac.' + player)), h, h / 2);
 
-    // adena
-    const adena = (this.state.factions && this.state.factions[player] && this.state.factions[player].adena) || 0;
-    ctx.textAlign = 'right'; ctx.fillStyle = PALETTE.gold;
-    ctx.fillText(`${this.t('hud.adena')}: ${adena}`, W - 12, h / 2);
-    // turn
+    // turn (centered)
     ctx.textAlign = 'center'; ctx.fillStyle = PALETTE.bone;
     ctx.fillText(`${this.t('hud.turn')} ${this.state.turn || 1}`, W / 2, h / 2);
+    ctx.textAlign = 'start';
+
+    // v3 multi-resource HUD: adena + wood + crystal, right-aligned, each with its
+    // own icon sliced 1x3 from assets/resources_sheet.png (procedural fallback).
+    // Resources read from state.factions[player].{adena,wood,crystal}.
+    const facRes = (this.state.factions && this.state.factions[player]) || {};
+    const adena = facRes.adena || 0;
+    const wood = (facRes.wood != null) ? facRes.wood : 0;
+    const crystal = (facRes.crystal != null) ? facRes.crystal : 0;
+    // Order MUST match the sheet (adena, wood, crystal) = indices 0,1,2.
+    const rows = [
+      { idx: 0, val: adena, color: PALETTE.gold },
+      { idx: 1, val: wood, color: '#caa46a' },
+      { idx: 2, val: crystal, color: '#9fd0e0' },
+    ];
+    const iconSz = h - 18;
+    const gap = 12;
+    ctx.font = `bold 13px "Trebuchet MS", sans-serif`;
+    // Measure right-to-left so the three chips pack against the right edge.
+    let rx = W - 10;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const row = rows[i];
+      const label = String(row.val);
+      const tw = ctx.measureText(label).width;
+      const chipW = iconSz + 4 + tw;
+      rx -= chipW;
+      const iy = (h - iconSz) / 2;
+      // Icon (sliced or procedural) via the renderer helper; guard its presence.
+      if (this.renderer && typeof this.renderer.drawResourceIcon === 'function') {
+        this.renderer.drawResourceIcon(ctx, row.idx, rx, iy, iconSz);
+      }
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = row.color;
+      ctx.fillText(label, rx + iconSz + 4, h / 2);
+      rx -= gap;
+    }
     ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
   }
 
@@ -1006,13 +1194,25 @@ export class UI {
     }
     if (col !== 0) by += bh + 6;
 
-    // Fortify + move hint row
+    // Fortify (+ Enter city, if this owned province has a city) + move hint row.
     const fy = y + panelH - 38;
+    const canEnter = this._canEnterCity(this.selectedId);
     const fortLabel = this.t('panel.fortify') + (prov.fortified ? ' ✓' : '');
-    this._btn(ctx, 'fortify', x + 12, fy, (w - 24) * 0.4, 30, fortLabel,
-      { type: 'fortify', provId: this.selectedId }, { r: 6, font: 'bold 12px sans-serif' });
-    ctx.fillStyle = PALETTE.gold; ctx.font = '11px sans-serif';
-    ctx.fillText(this.t('panel.move'), x + 12 + (w - 24) * 0.42, fy + 20);
+    if (canEnter) {
+      // Split the row: Fortify | Enter city. Move hint drops to its own line.
+      const halfW = (w - 24 - 8) / 2;
+      this._btn(ctx, 'fortify', x + 12, fy, halfW, 30, fortLabel,
+        { type: 'fortify', provId: this.selectedId }, { r: 6, font: 'bold 12px sans-serif' });
+      this._btn(ctx, 'enterCity', x + 12 + halfW + 8, fy, halfW, 30, this.t('panel.enterCity'),
+        { type: 'enterCity', provId: this.selectedId },
+        { r: 6, font: 'bold 12px sans-serif', fill: 'rgba(59,111,212,0.85)',
+          color: '#fff', stroke: PALETTE.gold });
+    } else {
+      this._btn(ctx, 'fortify', x + 12, fy, (w - 24) * 0.4, 30, fortLabel,
+        { type: 'fortify', provId: this.selectedId }, { r: 6, font: 'bold 12px sans-serif' });
+      ctx.fillStyle = PALETTE.gold; ctx.font = '11px sans-serif';
+      ctx.fillText(this.t('panel.move'), x + 12 + (w - 24) * 0.42, fy + 20);
+    }
   }
 
   _unitCost(unit, faction) {
