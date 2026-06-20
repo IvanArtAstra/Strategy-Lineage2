@@ -13,7 +13,8 @@ export const FACTIONS = {
     color: '#3b6fd4',
     accent: '#e8c45a',
     playable: true,
-    capital: 'aden',
+    capital: 'hardins', // royal seat of Aden is now a NEUTRAL crown objective; the
+                        //   Kingdom rules from Hardin's Academy on the road to the throne
     incomeMul: 1.15,
     roster: ['knight', 'gladiator', 'ranger', 'sorcerer', 'bishop'],
   },
@@ -40,6 +41,40 @@ export const FACTIONS = {
     costMul: 0.85,
     roster: ['gladiator', 'destroyer', 'ranger'],
   },
+  darkelf: {
+    id: 'darkelf',
+    nameKey: 'fac.darkelf',
+    color: '#8a4fae',
+    accent: '#caa6e0',
+    playable: true,
+    capital: 'darkelf',
+    incomeMul: 1.2, // swamp home, no crown: shadow-trade keeps the coffers lean-but-steady
+    meleeBonus: 1.15, // glass cannon: hits hard in melee...
+    magicBonus: 1.2, //                 ...and harder with shadow magic, but fragile
+    roster: ['shillienknight', 'phantomranger', 'spellhowler'],
+  },
+  dwarf: {
+    id: 'dwarf',
+    nameKey: 'fac.dwarf',
+    color: '#caa23c',
+    accent: '#e8d89a',
+    playable: true,
+    capital: 'dwarvenvillage',
+    incomeMul: 1.4, // master traders & smiths of the mountain guilds
+    defBonus: 1.15, // tanky: dwarven plate and stubborn shield walls
+    roster: ['dwarvendefender', 'bountyhunter', 'warsmith'],
+  },
+  kamael: {
+    id: 'kamael',
+    nameKey: 'fac.kamael',
+    color: '#5a8fb0',
+    accent: '#bcdce8',
+    playable: true,
+    capital: 'isleofsouls',
+    incomeMul: 1.25, // isolated isle, no crown: war-honed efficiency offsets the lean land
+    eliteBonus: 1.2, // the winged soldiers of the Isle of Souls — few but elite
+    roster: ['soulsoldier', 'soulranger', 'berserker'],
+  },
   shilen: {
     id: 'shilen',
     nameKey: 'fac.shilen',
@@ -51,4 +86,5 @@ export const FACTIONS = {
   },
 };
 
-export const PLAYABLE = ['human', 'elf', 'orc'];
+// Fixed pick order (crest_all.png is sliced as a 3×2 grid in this order).
+export const PLAYABLE = ['human', 'elf', 'orc', 'darkelf', 'dwarf', 'kamael'];
