@@ -16,6 +16,11 @@
 //   fortifyCapital                     — fortify the player's capital for free
 //   loseUnits{count}                   — lose units from a holding
 //   revealMap                          — reveal the whole map
+//   setFlag{flag}                      — set state.flags[flag]=true (v3 §8, drives event chains)
+//
+// Event-chain triggers (v3 §8, on top of the gate grammar above):
+//   requiresFlag:'x'   — eligible only if state.flags.x is truthy
+//   forbidsFlag:'x'    — eligible only if state.flags.x is falsy
 //
 // All title/desc/choice-label/result strings live in src/strings.js (ru+en).
 
@@ -157,6 +162,95 @@ export const EVENTS = [
     choices: [
       { id: 'fortify', labelKey: 'ev.antharas.fortify', effects: [{ type: 'adena', value: -140 }, { type: 'fortifyCapital' }, { type: 'spawnUnits', unit: 'knight', count: 3, where: 'capital' }], resultKey: 'ev.antharas.fortify.r' },
       { id: 'appease', labelKey: 'ev.antharas.appease', effects: [{ type: 'adena', value: -200 }, { type: 'blessIncome', turns: 5, mult: 1.4 }], resultKey: 'ev.antharas.appease.r' },
+    ],
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // LORE EVENT-CHAIN — "Семь Печатей" / "The Seven Seals" (v3 §8)
+  //
+  // A 3-step chain woven through the campaign. The Seals bind the slumbering
+  // power of Shilen beneath Aden. The player chooses, across three revelations,
+  // whether to serve the Lords of Dawn (uphold the Seals → a great boon) or the
+  // Revolutionaries of Dusk (break the Seals → unleash the undead surge).
+  //
+  // Flags set / read:
+  //   seals_started   — set by step 1 (player engages with the prophecy)
+  //   seals_dawn      — set when the player chooses the Dawn (light) path
+  //   seals_dusk      — set when the player chooses the Dusk (shadow) path
+  //   seals_done      — set by step 3 (chain concluded; prevents re-fire)
+  //
+  // Step gating:
+  //   1 seals_omen        — entry. No flag required; sets seals_started + a path flag.
+  //   2 seals_strife      — requiresFlag:'seals_started', forbidsFlag:'seals_done'.
+  //                         Branches read seals_dawn/seals_dusk via dedicated choices.
+  //   3 seals_judgment    — requiresFlag:'seals_started', forbidsFlag:'seals_done'.
+  //                         The culmination: big boon (Dawn) or undead surge (Dusk).
+  // Each step is oncePerGame; minTurn spacing keeps them in order.
+  // ─────────────────────────────────────────────────────────────────────────
+  {
+    id: 'seals_omen',
+    weight: 14,
+    oncePerGame: true,
+    trigger: { minTurn: 4, maxTurn: 40, owns: 'any', forbidsFlag: 'seals_started' },
+    titleKey: 'ev.seals1.title',
+    descKey: 'ev.seals1.desc',
+    choices: [
+      {
+        id: 'dawn',
+        labelKey: 'ev.seals1.dawn',
+        effects: [{ type: 'adena', value: -80 }, { type: 'setFlag', flag: 'seals_started' }, { type: 'setFlag', flag: 'seals_dawn' }, { type: 'fortifyCapital' }],
+        resultKey: 'ev.seals1.dawn.r',
+      },
+      {
+        id: 'dusk',
+        labelKey: 'ev.seals1.dusk',
+        effects: [{ type: 'adena', value: 120 }, { type: 'setFlag', flag: 'seals_started' }, { type: 'setFlag', flag: 'seals_dusk' }],
+        resultKey: 'ev.seals1.dusk.r',
+      },
+    ],
+  },
+  {
+    id: 'seals_strife',
+    weight: 16,
+    oncePerGame: true,
+    trigger: { minTurn: 8, maxTurn: 55, requiresFlag: 'seals_started', forbidsFlag: 'seals_done' },
+    titleKey: 'ev.seals2.title',
+    descKey: 'ev.seals2.desc',
+    choices: [
+      {
+        id: 'uphold',
+        labelKey: 'ev.seals2.uphold',
+        effects: [{ type: 'adena', value: -120 }, { type: 'setFlag', flag: 'seals_dawn' }, { type: 'blessIncome', turns: 4, mult: 1.3 }],
+        resultKey: 'ev.seals2.uphold.r',
+      },
+      {
+        id: 'shatter',
+        labelKey: 'ev.seals2.shatter',
+        effects: [{ type: 'setFlag', flag: 'seals_dusk' }, { type: 'spawnIncursion' }, { type: 'adena', value: 160 }],
+        resultKey: 'ev.seals2.shatter.r',
+      },
+    ],
+  },
+  {
+    id: 'seals_judgment',
+    weight: 20,
+    oncePerGame: true,
+    trigger: { minTurn: 14, maxTurn: 80, requiresFlag: 'seals_started', forbidsFlag: 'seals_done' },
+    titleKey: 'ev.seals3.title',
+    descKey: 'ev.seals3.desc',
+    choices: [
+      {
+        id: 'crown_dawn',
+        labelKey: 'ev.seals3.dawn',
+        effects: [{ type: 'setFlag', flag: 'seals_done' }, { type: 'adena', value: 260 }, { type: 'spawnUnits', unit: 'knight', count: 4, where: 'capital' }, { type: 'blessIncome', turns: 6, mult: 1.4 }, { type: 'fortifyCapital' }],
+        resultKey: 'ev.seals3.dawn.r',
+      },
+      {
+        id: 'crown_dusk',
+        labelKey: 'ev.seals3.dusk',
+        effects: [{ type: 'setFlag', flag: 'seals_done' }, { type: 'spawnIncursion' }, { type: 'spawnIncursion' }, { type: 'spawnUnits', unit: 'wraith', count: 4, where: 'frontline' }, { type: 'revealMap' }],
+        resultKey: 'ev.seals3.dusk.r',
+      },
     ],
   },
 ];

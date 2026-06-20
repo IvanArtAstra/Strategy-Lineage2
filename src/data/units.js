@@ -21,18 +21,20 @@ export const UNITS = {
   sorcerer:   { id: 'sorcerer',   nameKey: 'unit.sorcerer',   type: 'mag',    cost: 160, upkeep: 12, hp: 30, atk: 31, def: 4,  factions: ['human', 'elf'] },
   bishop:     { id: 'bishop',     nameKey: 'unit.bishop',     type: 'heal',   cost: 150, upkeep: 11, hp: 34, atk: 6,  def: 8,  factions: ['human', 'elf'] },
   destroyer:  { id: 'destroyer',  nameKey: 'unit.destroyer',  type: 'cav',    cost: 140, upkeep: 10, hp: 76, atk: 24, def: 12, factions: ['orc'] },
-  // Dark Elf — Vale of Shadows (glass cannon: high atk, low def):
-  shillienknight: { id: 'shillienknight', nameKey: 'unit.shillienknight', type: 'inf',  cost: 125, upkeep: 9,  hp: 54, atk: 21, def: 11, factions: ['darkelf'] },
-  phantomranger:  { id: 'phantomranger',  nameKey: 'unit.phantomranger',  type: 'arch', cost: 115, upkeep: 8,  hp: 34, atk: 25, def: 5,  factions: ['darkelf'] },
-  spellhowler:    { id: 'spellhowler',    nameKey: 'unit.spellhowler',    type: 'mag',  cost: 165, upkeep: 12, hp: 28, atk: 34, def: 4,  factions: ['darkelf'] },
-  // Dwarf — Mountain Guilds (tanky, expensive plate, support smith):
-  dwarvendefender: { id: 'dwarvendefender', nameKey: 'unit.dwarvendefender', type: 'inf',  cost: 130, upkeep: 9,  hp: 78, atk: 12, def: 24, factions: ['dwarf'] },
-  bountyhunter:    { id: 'bountyhunter',    nameKey: 'unit.bountyhunter',    type: 'cav',  cost: 135, upkeep: 10, hp: 70, atk: 22, def: 14, factions: ['dwarf'] },
-  warsmith:        { id: 'warsmith',        nameKey: 'unit.warsmith',        type: 'heal', cost: 145, upkeep: 10, hp: 40, atk: 8,  def: 12, factions: ['dwarf'] },
-  // Kamael — Isle of Souls (balanced elites):
+  // Dark Elf — Vale of Shadows (glass cannon: high atk, low def — nudged a touch
+  //   sturdier so the faction is swingy, not hopeless; flavor preserved):
+  shillienknight: { id: 'shillienknight', nameKey: 'unit.shillienknight', type: 'inf',  cost: 125, upkeep: 9,  hp: 58, atk: 21, def: 13, factions: ['darkelf'] },
+  phantomranger:  { id: 'phantomranger',  nameKey: 'unit.phantomranger',  type: 'arch', cost: 115, upkeep: 8,  hp: 37, atk: 25, def: 6,  factions: ['darkelf'] },
+  spellhowler:    { id: 'spellhowler',    nameKey: 'unit.spellhowler',    type: 'mag',  cost: 165, upkeep: 12, hp: 31, atk: 34, def: 5,  factions: ['darkelf'] },
+  // Dwarf — Mountain Guilds (tanky, expensive plate, support smith — bountyhunter
+  //   nudged so dwarves can actually close out fights, not just outlast them):
+  dwarvendefender: { id: 'dwarvendefender', nameKey: 'unit.dwarvendefender', type: 'inf',  cost: 130, upkeep: 9,  hp: 78, atk: 13, def: 24, factions: ['dwarf'] },
+  bountyhunter:    { id: 'bountyhunter',    nameKey: 'unit.bountyhunter',    type: 'cav',  cost: 135, upkeep: 10, hp: 70, atk: 24, def: 14, factions: ['dwarf'] },
+  warsmith:        { id: 'warsmith',        nameKey: 'unit.warsmith',        type: 'heal', cost: 145, upkeep: 10, hp: 42, atk: 8,  def: 13, factions: ['dwarf'] },
+  // Kamael — Isle of Souls (balanced elites; left near-stock, already viable):
   soulsoldier: { id: 'soulsoldier', nameKey: 'unit.soulsoldier', type: 'inf',  cost: 125, upkeep: 9,  hp: 60, atk: 18, def: 16, factions: ['kamael'] },
   soulranger:  { id: 'soulranger',  nameKey: 'unit.soulranger',  type: 'arch', cost: 115, upkeep: 8,  hp: 38, atk: 23, def: 7,  factions: ['kamael'] },
-  berserker:   { id: 'berserker',   nameKey: 'unit.berserker',   type: 'cav',  cost: 140, upkeep: 10, hp: 72, atk: 25, def: 11, factions: ['kamael'] },
+  berserker:   { id: 'berserker',   nameKey: 'unit.berserker',   type: 'cav',  cost: 140, upkeep: 10, hp: 72, atk: 25, def: 12, factions: ['kamael'] },
   // Shilen — Undead Legion (AI-only, free, no upkeep):
   wraith:      { id: 'wraith',      nameKey: 'unit.wraith',      type: 'undead', cost: 0, upkeep: 0, hp: 44, atk: 18, def: 10, factions: ['shilen'] },
   bonearcher:  { id: 'bonearcher',  nameKey: 'unit.bonearcher',  type: 'arch',   cost: 0, upkeep: 0, hp: 30, atk: 20, def: 5,  factions: ['shilen'] },
