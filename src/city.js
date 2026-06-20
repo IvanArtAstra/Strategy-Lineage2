@@ -68,7 +68,10 @@ function active() {
 export function registerCity() {
   try {
     if (typeof engineRegisterCity === 'function') {
-      engineRegisterCity({ cityTick });
+      // Register the FULL api: the engine needs hasCity/canBuild/startBuild for
+      // capital-townhall seeding (createGame) and AI city development (ai.js),
+      // not just cityTick. (Declarations are hoisted, so forward refs are fine.)
+      engineRegisterCity({ cityTick, hasCity, ensureCity, canBuild, startBuild, cityView });
     }
   } catch (e) {
     // Engine missing the hook — degrade silently; base game still runs.
@@ -448,3 +451,8 @@ export function cityView(state, provId) {
     fortified: !!prov.fortified,
   };
 }
+
+// Self-register on import (mirrors ai.js calling registerAi()), so the engine's
+// createGame seeding + endTurn cityTick + AI building all work as soon as this
+// module is loaded — main.js also calls registerCity() (idempotent).
+registerCity();
