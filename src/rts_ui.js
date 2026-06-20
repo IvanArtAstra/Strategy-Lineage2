@@ -294,7 +294,7 @@ function buildOverlay(opts, t) {
       hudLeft.textContent = t('rts.yourArmy') + ': ' + yours;
       hudMid.textContent = t('rts.title');
       hudRight.textContent = t('rts.enemy') + ': ' + enemy + '   ' +
-        t('rts.time') + ' ' + (time | 0) + 's';
+        t('rts.time') + ' ' + ((time / 1000) | 0) + 's';
     },
     showBanner(text, color) {
       banner.textContent = text;
@@ -731,10 +731,14 @@ async function create3DBackend(canvas, opts, field, state, RTS) {
   if (!gl) return null;
 
   // Dynamically import Three.js + the GLTFLoader (page import map resolves 'three').
-  let THREE, GLTFLoader;
+  let THREE, GLTFLoader, SkeletonClone = null;
   try {
     THREE = await import('three');
     ({ GLTFLoader } = await import('./vendor/GLTFLoader.js'));
+    // SkeletonUtils.clone is REQUIRED to clone skinned/animated GLBs correctly —
+    // a naive scene.clone(true) breaks skeleton binding and renders the mesh as a
+    // giant exploded blob. Optional: if it fails, cloneScene degrades to .clone(true).
+    try { const SU = await import('./vendor/SkeletonUtils.js'); SkeletonClone = SU.clone || (SU.SkeletonUtils && SU.SkeletonUtils.clone) || null; } catch (_) { SkeletonClone = null; }
   } catch (_) {
     return null;
   }
@@ -772,7 +776,10 @@ async function create3DBackend(canvas, opts, field, state, RTS) {
   // Camera: angled RTS view, drag-pan + wheel/pinch zoom (clamped).
   const camera = new THREE.PerspectiveCamera(50, canvas.width / canvas.height, 0.1, 2000);
   const camTarget = new THREE.Vector3(field.w / 2, 0, field.h / 2);
-  const camCtl = { dist: Math.max(field.w, field.h) * 0.9, yaw: 0, pitch: 0.95, minDist: 20, maxDist: Math.max(field.w, field.h) * 1.8 };
+  // yaw 90° puts the two armies along the screen's LONG axis (works for portrait
+  // phones, where the field width would otherwise overflow horizontally); distance
+  // sized to fit the whole field in view.
+  const camCtl = { dist: Math.max(field.w, field.h) * 1.45, yaw: Math.PI / 2, pitch: 0.82, minDist: 30, maxDist: Math.max(field.w, field.h) * 2.4 };
   function updateCamera() {
     const d = camCtl.dist;
     const cx = camTarget.x + Math.sin(camCtl.yaw) * d * Math.cos(camCtl.pitch);
@@ -804,6 +811,9 @@ async function create3DBackend(canvas, opts, field, state, RTS) {
   // hierarchy; skinned meshes still animate off a fresh mixer in practice for
   // these generated idle clips.
   function cloneScene(src) {
+    // SkeletonUtils.clone correctly rebinds the skeleton of skinned/animated meshes;
+    // a plain clone(true) shares/breaks the skeleton -> giant exploded model.
+    if (SkeletonClone) { try { return SkeletonClone(src); } catch (_) {} }
     try { return src.clone(true); } catch (_) { return src.clone(); }
   }
 
@@ -880,14 +890,11 @@ async function create3DBackend(canvas, opts, field, state, RTS) {
     loadModel(modelKeyFor(u.unitId)).then((gltf) => {
       if (!gltf || !gltf.scene || rec.disposed) return;
       const inst = cloneScene(gltf.scene);
-      // scale to a sensible height (~2.4 units)
-      try {
-        const box = new THREE.Box3().setFromObject(inst);
-        const h = Math.max(0.001, box.max.y - box.min.y);
-        const s = 2.4 / h;
-        inst.scale.setScalar(s);
-        inst.position.y = -box.min.y * s;
-      } catch (_) {}
+      // FIXED scale: every generated GLB is ~0.9 units tall (a-pose, feet ≈ y=0).
+      // Box3 on skinned/animated meshes is unreliable here (gives empty -> giant, or
+      // huge -> invisible), so use a constant factor — bulletproof, never explodes.
+      inst.scale.setScalar(2.85);   // ~0.9u -> ~2.55u characters
+      inst.position.y = 0;
       // tint by team via emissive on standard materials
       const c = TEAM_COLOR[u.team] || TEAM_COLOR.attacker;
       inst.traverse((o) => {
