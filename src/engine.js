@@ -61,10 +61,16 @@ export function createGame({ playerFaction, seed }) {
     if (basic) provinces[id].garrison[basic] = CONST.STARTING_GARRISON;
   }
   // Neutral provinces get a light defensive garrison so early expansion costs
-  // something.
-  for (const p of PROVINCES) {
-    if (provinces[p.id].owner === NEUTRAL) {
-      provinces[p.id].garrison = { gladiator: p.castle ? 3 : 2 };
+  // something. Use a generic militia unit (gladiator if present, else the first
+  // non-shilen unit) so this stays valid across content packs.
+  const neutralUnit = UNITS.gladiator
+    ? 'gladiator'
+    : Object.keys(UNITS).find((uid) => !(UNITS[uid].factions || []).includes('shilen'));
+  if (neutralUnit) {
+    for (const p of PROVINCES) {
+      if (provinces[p.id].owner === NEUTRAL) {
+        provinces[p.id].garrison = { [neutralUnit]: p.castle ? 3 : 2 };
+      }
     }
   }
 
@@ -181,6 +187,14 @@ export function income(state) {
     }
     const incomeMul = (FACTIONS[fid] && FACTIONS[fid].incomeMul) || 1;
     gross = Math.round(gross * incomeMul);
+    // Temporary income blessing (from events/skills): multiply gross while
+    // active, then tick its remaining turns down.
+    const bless = fac.blessIncome;
+    if (bless && (bless.turns | 0) > 0) {
+      gross = Math.round(gross * (bless.mult || 1));
+      bless.turns = (bless.turns | 0) - 1;
+      if (bless.turns <= 0) fac.blessIncome = null;
+    }
     const upkeep = totalUpkeep(state, fid);
     const net = gross - upkeep;
     fac.adena += net;
@@ -413,7 +427,8 @@ export function endTurn(state) {
   if (state.phase === 'over') return state;
 
   // AI is wired in via registerAi() (ai.js calls it on import), avoiding a
-  // static cyclic import between engine.js and ai.js.
+  // static cyclic import between engine.js and ai.js. Events/skills wire in the
+  // same way (events.js -> registerEvents, skills.js -> registerSkills).
   const ai = AI_IMPL;
 
   // 1. Rival AI factions act (deterministic order).
@@ -430,10 +445,15 @@ export function endTurn(state) {
     state = ai.shilenIncursion(state);
   }
 
-  // 3. Income for everyone.
+  // 3. Income for everyone (also ticks income blessings).
   income(state);
 
-  // 4. Victory / defeat.
+  // 4. Tick clan-skill cooldowns down by one turn.
+  if (SKILLS_IMPL && SKILLS_IMPL.tickCooldowns) {
+    state = SKILLS_IMPL.tickCooldowns(state);
+  }
+
+  // 5. Victory / defeat.
   const result = checkVictory(state);
   if (result) {
     state.phase = 'over';
@@ -448,9 +468,16 @@ export function endTurn(state) {
     return state;
   }
 
-  // 5. Advance turn.
+  // 6. Advance turn.
   state.turn += 1;
   refreshAlive(state);
+
+  // 7. Campaign events: at most one may fire for the player this turn. Sets
+  // state.pendingEvent for the client to resolve via resolveEvent().
+  if (EVENTS_IMPL && EVENTS_IMPL.maybeFireEvent) {
+    state = EVENTS_IMPL.maybeFireEvent(state);
+  }
+
   return state;
 }
 
@@ -459,6 +486,332 @@ export function endTurn(state) {
 let AI_IMPL = null;
 export function registerAi(impl) {
   AI_IMPL = impl;
+}
+
+// Events wiring: events.js calls registerEvents(impl) so endTurn can fire
+// campaign events. impl = { maybeFireEvent, resolveEvent }.
+let EVENTS_IMPL = null;
+export function registerEvents(impl) {
+  EVENTS_IMPL = impl;
+}
+
+// Skills wiring: skills.js calls registerSkills(impl) so endTurn can tick
+// cooldowns. impl = { tickCooldowns }.
+let SKILLS_IMPL = null;
+export function registerSkills(impl) {
+  SKILLS_IMPL = impl;
+}
+
+// Lazily create the per-game clan-skill slot. Used by skills.js.
+export function ensureSkillsState(state) {
+  if (!state.skills) state.skills = { cooldowns: {} };
+  if (!state.skills.cooldowns) state.skills.cooldowns = {};
+  return state.skills;
+}
+
+// ---------------------------------------------------------------------------
+// Declarative effect application (shared by events.js and skills.js).
+//
+// Effects apply to `faction` (the acting/player faction) unless an effect
+// names a `target` faction. Province-scoped effects default their province to
+// `defaultProv` (the chosen target province for a skill / event), and honor an
+// explicit `where` ('capital' | 'frontline') for spawn placement.
+//
+// Supported effect types (must match interfaces-v2.md §2 + §3 exactly):
+//   adena        { value }                         — add/subtract adena
+//   blessIncome  { turns, mult }                   — temporary income multiplier
+//   spawnUnits   { unit, count, where }            — add units to a province
+//   spawnIncursion {}                              — trigger a Shilen incursion now
+//   fortifyCapital {}                              — fortify the faction capital free
+//   loseUnits    { count }                         — remove N units (frontline-weighted)
+//   revealMap    {}                                — set state.revealed flag
+//   healGarrison { pct }                           — +pct of target garrison (resurrect)
+//   smite        { frac }                          — kill frac of target enemy garrison
+//   summon       { unit, count }                   — add units to the target province
+//   fortifyFree  {}                                — fortify the target province free
+// ---------------------------------------------------------------------------
+
+export function applyEffects(state, faction, effects, defaultProv) {
+  for (const eff of effects || []) {
+    if (!eff || !eff.type) continue;
+    const fid = eff.target || faction;
+    applyOneEffect(state, fid, eff, defaultProv);
+  }
+  refreshAlive(state);
+  return state;
+}
+
+function applyOneEffect(state, fid, eff, defaultProv) {
+  switch (eff.type) {
+    case 'adena': {
+      const fac = state.factions[fid];
+      if (fac) {
+        fac.adena = Math.max(0, (fac.adena | 0) + (eff.value | 0));
+        pushLog(state, 'log.effect.adena', { faction: fid, value: eff.value | 0 });
+      }
+      break;
+    }
+    case 'blessIncome': {
+      const fac = state.factions[fid];
+      if (fac) {
+        fac.blessIncome = { turns: eff.turns | 0, mult: eff.mult || 1 };
+        pushLog(state, 'log.effect.blessIncome', { faction: fid, turns: eff.turns | 0, mult: eff.mult || 1 });
+      }
+      break;
+    }
+    case 'spawnUnits': {
+      const prov = pickSpawnProvince(state, fid, eff.where || 'capital', defaultProv);
+      if (prov) {
+        const uid = resolveUnitFor(fid, eff.unit);
+        if (uid) {
+          prov.garrison[uid] = (prov.garrison[uid] | 0) + (eff.count | 0 || 1);
+          pushLog(state, 'log.effect.spawnUnits', { faction: fid, unit: uid, count: eff.count | 0 || 1, prov: prov.id });
+        }
+      }
+      break;
+    }
+    case 'summon': {
+      const prov = defaultProv ? state.provinces[defaultProv] : pickSpawnProvince(state, fid, 'capital', null);
+      if (prov && prov.owner === fid) {
+        const uid = resolveUnitFor(fid, eff.unit);
+        if (uid) {
+          prov.garrison[uid] = (prov.garrison[uid] | 0) + (eff.count | 0 || 1);
+          pushLog(state, 'log.effect.summon', { faction: fid, unit: uid, count: eff.count | 0 || 1, prov: prov.id });
+        }
+      }
+      break;
+    }
+    case 'spawnIncursion': {
+      // Fire a Shilen incursion immediately if the AI is wired in.
+      if (AI_IMPL && AI_IMPL.shilenIncursion) {
+        // Force the incursion regardless of cadence by temporarily marking it.
+        state = AI_IMPL.shilenIncursion(state, { force: true });
+      }
+      pushLog(state, 'log.effect.spawnIncursion', { trigger: fid });
+      break;
+    }
+    case 'fortifyCapital': {
+      const capId = FACTIONS[fid] && FACTIONS[fid].capital;
+      const prov = capId && state.provinces[capId];
+      if (prov && prov.owner === fid && !prov.fortified) {
+        prov.fortified = true;
+        pushLog(state, 'log.effect.fortifyCapital', { faction: fid, prov: capId });
+      }
+      break;
+    }
+    case 'fortifyFree': {
+      const prov = defaultProv ? state.provinces[defaultProv] : null;
+      if (prov && prov.owner === fid && !prov.fortified) {
+        prov.fortified = true;
+        pushLog(state, 'log.effect.fortifyFree', { faction: fid, prov: prov.id });
+      }
+      break;
+    }
+    case 'loseUnits': {
+      removeUnits(state, fid, eff.count | 0 || 1);
+      pushLog(state, 'log.effect.loseUnits', { faction: fid, count: eff.count | 0 || 1 });
+      break;
+    }
+    case 'revealMap': {
+      state.revealed = true;
+      pushLog(state, 'log.effect.revealMap', { faction: fid });
+      break;
+    }
+    case 'healGarrison': {
+      const prov = defaultProv ? state.provinces[defaultProv] : null;
+      if (prov) {
+        const pct = eff.pct || 0;
+        let added = 0;
+        for (const uid in prov.garrison) {
+          const cur = prov.garrison[uid] | 0;
+          const extra = Math.round(cur * pct);
+          if (extra > 0) {
+            prov.garrison[uid] = cur + extra;
+            added += extra;
+          }
+        }
+        pushLog(state, 'log.effect.healGarrison', { faction: prov.owner, prov: prov.id, added, pct });
+      }
+      break;
+    }
+    case 'smite': {
+      const prov = defaultProv ? state.provinces[defaultProv] : null;
+      if (prov) {
+        const frac = eff.frac || 0;
+        let killed = 0;
+        for (const uid in prov.garrison) {
+          const cur = prov.garrison[uid] | 0;
+          const dead = Math.floor(cur * frac);
+          if (dead > 0) {
+            prov.garrison[uid] = cur - dead;
+            if (prov.garrison[uid] <= 0) delete prov.garrison[uid];
+            killed += dead;
+          }
+        }
+        pushLog(state, 'log.effect.smite', { prov: prov.id, owner: prov.owner, killed, frac });
+      }
+      break;
+    }
+    default:
+      // Unknown effect type: ignore (forward-compatible).
+      break;
+  }
+}
+
+// Pick a province to spawn units into for `faction`, per `where`.
+//   'capital'   — the faction capital if owned, else the first owned province.
+//   'frontline' — an owned province adjacent to a non-owned one, else capital.
+// If a defaultProv (owned by faction) is supplied it is preferred.
+function pickSpawnProvince(state, faction, where, defaultProv) {
+  if (defaultProv) {
+    const p = state.provinces[defaultProv];
+    if (p && p.owner === faction) return p;
+  }
+  const owned = ownedBy(state, faction);
+  if (owned.length === 0) return null;
+  const capId = FACTIONS[faction] && FACTIONS[faction].capital;
+  if (where === 'frontline') {
+    for (const id of owned) {
+      const meta = PROV_BY_ID[id];
+      if (meta && (meta.neighbors || []).some((n) => state.provinces[n] && state.provinces[n].owner !== faction)) {
+        return state.provinces[id];
+      }
+    }
+  }
+  if (capId && state.provinces[capId] && state.provinces[capId].owner === faction) {
+    return state.provinces[capId];
+  }
+  return state.provinces[owned[0]];
+}
+
+// Resolve a unit id for a faction: use the requested unit if it is in the
+// roster, else fall back to the faction's cheapest unit. Returns null if none.
+function resolveUnitFor(faction, requested) {
+  const fac = FACTIONS[faction];
+  if (fac && fac.roster && requested && fac.roster.includes(requested) && UNITS[requested]) {
+    return requested;
+  }
+  if (requested && UNITS[requested]) return requested; // off-roster but valid (e.g. summoned guardians)
+  return basicUnitFor(faction);
+}
+
+// Remove `count` units from a faction, frontline provinces first.
+function removeUnits(state, faction, count) {
+  let remaining = count;
+  const owned = ownedBy(state, faction).sort((a, b) => {
+    const fa = (PROV_BY_ID[a].neighbors || []).some((n) => state.provinces[n] && state.provinces[n].owner !== faction) ? 0 : 1;
+    const fb = (PROV_BY_ID[b].neighbors || []).some((n) => state.provinces[n] && state.provinces[n].owner !== faction) ? 0 : 1;
+    return fa - fb;
+  });
+  for (const id of owned) {
+    if (remaining <= 0) break;
+    const g = state.provinces[id].garrison;
+    for (const uid in g) {
+      if (remaining <= 0) break;
+      const take = Math.min(g[uid] | 0, remaining);
+      g[uid] -= take;
+      remaining -= take;
+      if (g[uid] <= 0) delete g[uid];
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Manual-battle hooks (contract v2 §4). planBattle gathers the inputs the
+// tactical screen needs WITHOUT mutating ownership; applyBattleOutcome applies
+// a resolved outcome (same shape as combat.resolveBattle's return) to the map.
+// The client uses these for the interactive battle, falling back to moveArmy.
+// ---------------------------------------------------------------------------
+
+// planBattle(state, fromId, toId, units)
+//  -> { battle:false, state }  when the move is a reinforce/no-op (no fight)
+//  -> { battle:true, attacker, defender, terrain, fortified, rngState, from, to, units }
+// Does NOT mutate ownership or garrisons; only validates and snapshots inputs.
+export function planBattle(state, fromId, toId, units) {
+  const from = state.provinces[fromId];
+  const to = state.provinces[toId];
+  if (!from || !to) return { battle: false, state };
+  if (!legalMoves(state, fromId).includes(toId)) return { battle: false, state };
+
+  // Validate the moving force against the source garrison.
+  const moving = {};
+  for (const uid in units) {
+    const take = Math.min(units[uid] | 0, from.garrison[uid] | 0);
+    if (take > 0) moving[uid] = take;
+  }
+  if (garrisonSize(moving) === 0) return { battle: false, state };
+
+  // Friendly or empty target -> no battle (caller should just moveArmy).
+  if (to.owner === from.owner) return { battle: false, state };
+
+  const meta = PROV_BY_ID[toId];
+  return {
+    battle: true,
+    attacker: { faction: from.owner, garrison: Object.assign({}, moving) },
+    defender: { faction: to.owner, garrison: Object.assign({}, to.garrison) },
+    terrain: meta ? meta.terrain : 'plains',
+    fortified: !!to.fortified,
+    rngState: state.rngState,
+    from: fromId,
+    to: toId,
+    units: Object.assign({}, moving),
+  };
+}
+
+// applyBattleOutcome(state, fromId, toId, units, outcome) -> { state }
+// `outcome` MUST equal combat.resolveBattle's return shape (winner,
+// attackerLosses, defenderLosses, attackerSurvivors, defenderSurvivors, rounds,
+// log). Deducts the moving force from the source, applies losses, and on an
+// attacker win transfers the province + moves survivors in. Advances rng so a
+// manual battle leaves the same rng footprint as the auto path.
+export function applyBattleOutcome(state, fromId, toId, units, outcome) {
+  const from = state.provinces[fromId];
+  const to = state.provinces[toId];
+  if (!from || !to || !outcome) return { state };
+
+  // Recompute & deduct the actual moving force from the source (the units that
+  // marched out — they are not in `from` anymore regardless of the result).
+  const moving = {};
+  for (const uid in units) {
+    const take = Math.min(units[uid] | 0, from.garrison[uid] | 0);
+    if (take > 0) moving[uid] = take;
+  }
+  for (const uid in moving) {
+    from.garrison[uid] -= moving[uid];
+    if (from.garrison[uid] <= 0) delete from.garrison[uid];
+  }
+
+  const mover = from.owner;
+
+  // Bubble the battle log into the state log (same prefixing as moveArmy).
+  for (const entry of outcome.log || []) pushLog(state, 'log.' + entry.key, entry.params);
+
+  if (outcome.winner === 'attacker') {
+    const prevOwner = to.owner;
+    to.owner = mover;
+    to.garrison = Object.assign({}, outcome.attackerSurvivors || {});
+    to.fortified = false;
+    pushLog(state, 'log.capture', { faction: mover, from: prevOwner, prov: toId });
+  } else {
+    to.garrison = Object.assign({}, outcome.defenderSurvivors || {});
+    const remnants = outcome.attackerSurvivors || {};
+    for (const uid in remnants) {
+      from.garrison[uid] = (from.garrison[uid] | 0) + (remnants[uid] | 0);
+    }
+    pushLog(state, 'log.repelled', { faction: to.owner, attacker: mover, prov: toId });
+  }
+
+  // Advance the rng by the number of rounds resolved so determinism/state
+  // progression mirror the auto path (the manual screen consumed its own rng
+  // off a snapshot; here we move the canonical counter forward).
+  const rounds = (outcome.rounds && outcome.rounds.length) || 0;
+  withRng(state, (rng) => {
+    for (let i = 0; i < rounds; i++) rng();
+    return null;
+  });
+
+  refreshAlive(state);
+  return { state };
 }
 
 // ---------------------------------------------------------------------------
