@@ -19,3 +19,11 @@ Redeployed in place (same game_id / same URL). Expansion adds: 3 new factions
 tactical battles, lore campaign events, and clan skills. New design contract:
 `design/interfaces-v2.md`. Built across branches feat/content-expansion, feat/engine-systems,
 feat/tactical-battle, feat/client-features, feat/assets-v2.
+
+## Update — Cities & Economy (2026-06-21)
+Redeployed in place (same game_id / same URL). Adds a Heroes-of-M&M-style city system
+(11 cities on castles + capitals; build/upgrade 9 building types over multiple turns; new
+Wood + Crystal resources; resource + unit production; AI city development), the "Seven Seals"
+lore event-chain, a 6-faction balance pass, and 5 new music tracks (battle/victory/city/darkelf/orc).
+New design contract: `design/interfaces-v3.md`. Built across branches feat/content-v3,
+feat/city-logic, feat/engine-core, feat/city-client, feat/map-client, feat/assets-v3.
