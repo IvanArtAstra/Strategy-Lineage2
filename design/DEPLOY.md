@@ -34,3 +34,11 @@ mode (5 towers, 8 waves, bone-golem boss, bonus rewards), CITY SIEGES (wall inte
 level, batter/storm/hold), HERO-COMMANDERS (6 heroes, items/inventory, leveling, battle bonuses),
 and a 5-mission CAMPAIGN. New contract: design/interfaces-v4.md. Built across branches feat/td,
 feat/siege, feat/heroes, feat/campaign, feat/engine-v4, feat/map-v4, feat/content-v4, feat/assets-v4.
+
+## Update — Real-time 3D RTS battles (2026-06-21)
+Redeployed in place (same game_id / same URL). Field battles now play out in a real-time
+RTS arena rendered in 3D (Three.js + 5 rigged GLB character models from image_to_3d), with unit
+selection + move/attack commands, auto-resolve, and a 2D top-down fallback for no-WebGL devices.
+New contract: design/interfaces-v5.md. Branches: feat/rts-logic, feat/rts-3d. Three.js + GLTFLoader
++ SkeletonUtils vendored under src/vendor/ (import map in index.html); models under assets/models/.
+Integrator fixes: SkeletonUtils.clone (skinned-mesh clone), fixed model scale, portrait camera framing.
