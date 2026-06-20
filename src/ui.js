@@ -153,6 +153,24 @@ export class UI {
   async init() {
     await this._initAudio();
     await this._loadSkillData();
+    await this._loadEventData();
+  }
+
+  // The engine's pendingEvent.choices carry only {id,labelKey}; the per-choice
+  // resultKey lives in data/events.js. Lazily load it to show the outcome line.
+  async _loadEventData() {
+    this._eventData = {};
+    try {
+      const mod = await import('./data/events.js');
+      const list = (mod && (mod.EVENTS || mod.default)) || [];
+      for (const e of list) if (e && e.id) this._eventData[e.id] = e;
+    } catch (e) { /* no event data -> outcome line omitted, modal still dismissable */ }
+  }
+
+  _eventResultKey(evId, choiceId) {
+    const e = this._eventData && this._eventData[evId];
+    const c = e && (e.choices || []).find(x => x.id === choiceId);
+    return (c && c.resultKey) || null;
   }
 
   // Resilient: data/skills.js is owned by another branch and may be absent.
@@ -463,9 +481,11 @@ export class UI {
       } catch (e) { console.warn('[ui] resolveEvent failed', e && e.message); }
     }
     // Show the chosen result line (from the just-applied choice), then a Continue.
+    // pendingEvent.choices only carry {id,labelKey}; resultKey comes from data/events.js.
     const ev = m.event || {};
     const choice = (ev.choices || []).find(c => c.id === cmd.choiceId);
-    m.result = (choice && choice.resultKey) || null;
+    m.resolved = true; // always advance to the Continue view so the modal can be dismissed
+    m.result = (choice && choice.resultKey) || this._eventResultKey(ev.id, cmd.choiceId) || null;
     // Engine clears state.pendingEvent on resolve; keep modal until user dismisses.
     this._refreshVM();
     this.requestRedraw();
@@ -1112,7 +1132,7 @@ export class UI {
     let ly = y + 56;
     ly = this._wrapText(ctx, desc, x + 16, ly, w - 32, 18);
 
-    if (!m.result) {
+    if (!m.resolved) {
       // choice buttons
       ctx.fillStyle = PALETTE.gold; ctx.font = 'bold 12px sans-serif';
       ctx.fillText(this.t('event.choose'), x + 16, ly + 8);
@@ -1128,11 +1148,13 @@ export class UI {
         by += bh + 8;
       }
     } else {
-      // result line + continue
-      ctx.fillStyle = PALETTE.royalBlue; ctx.font = 'bold 13px sans-serif';
-      ctx.fillText(this.t('event.result'), x + 16, ly + 8);
-      ctx.fillStyle = PALETTE.bone; ctx.font = '13px sans-serif';
-      this._wrapText(ctx, this.t(m.result), x + 16, ly + 28, w - 32, 18);
+      // result line (if any) + continue
+      if (m.result) {
+        ctx.fillStyle = PALETTE.royalBlue; ctx.font = 'bold 13px sans-serif';
+        ctx.fillText(this.t('event.result'), x + 16, ly + 8);
+        ctx.fillStyle = PALETTE.bone; ctx.font = '13px sans-serif';
+        this._wrapText(ctx, this.t(m.result), x + 16, ly + 28, w - 32, 18);
+      }
       const bw = w - 32, bh = 42;
       this._btn(ctx, 'evContinue', x + 16, y + h - bh - 12, bw, bh,
         this.t('event.continue'), { type: 'closeEvent' },
