@@ -18,7 +18,11 @@ async function tryRegister(path, registerFns) {
     // Call any of the named register* exports if present (engine wires the system).
     for (const fn of registerFns) {
       if (mod && typeof mod[fn] === 'function') {
-        try { mod[fn](engine); } catch (e) { /* registration is best-effort */ }
+        // registerEvents/registerSkills are async (they dynamic-import their data
+        // and wire into the engine) — AWAIT so registration completes before the
+        // first endTurn can fire an event / read skill status.
+        try { await mod[fn](engine); } catch (e) { /* registration is best-effort */ }
+        break; // one register entry-point per module
       }
     }
     return mod;
