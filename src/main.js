@@ -11,6 +11,7 @@ import { UI } from './ui.js';
 let engine = null, strings = null, battleUi = null;
 let eventsMod = null, skillsMod = null;   // event/skill engines (own modules)
 let cityMod = null, cityUiMod = null;     // v3: city engine (city.js) + city screen (city_ui.js)
+let rtsUiMod = null;                       // v5: real-time RTS battle screen (rts_ui.js)
 // v4 feature modules (all optional; absent -> the feature button hides, base game intact).
 let tdMod = null, tdUiMod = null;         // wave defense: sim (td.js) + screen (td_ui.js)
 let siegeMod = null, siegeUiMod = null;   // city sieges: model (siege.js) + screen (siege_ui.js)
@@ -80,6 +81,9 @@ async function loadModules() {
     console.warn('[main] city_ui.js not available yet:', e.message);
     cityUiMod = null;
   }
+  // v5 real-time RTS battle screen (3D Three.js / 2D fallback). Absent -> field
+  // battles use the v2 tactical screen; the rest of the game is unchanged.
+  try { rtsUiMod = await import('./rts_ui.js'); } catch (e) { rtsUiMod = null; }
 
   // ---- v4 feature modules (all OPTIONAL; mirror the v2/v3 resilient pattern) ----
   // Heroes engine registers via registerHeroes(engine) (like registerCity) so the
@@ -425,6 +429,8 @@ async function boot() {
     ? heroUiMod.openHeroes : null;
   const openCampaign = (campaignUiMod && typeof campaignUiMod.openCampaign === 'function')
     ? campaignUiMod.openCampaign : null;
+  const openRtsBattle = (rtsUiMod && typeof rtsUiMod.openRtsBattle === 'function')
+    ? rtsUiMod.openRtsBattle : null;
 
   renderer = new Renderer(canvas);
   ui = new UI({
@@ -448,6 +454,7 @@ async function boot() {
     openCampaign,
     heroApi: hasHeroApi ? heroApi : null,
     campaignApi: Object.keys(campaignApi).length ? campaignApi : null,
+    openRtsBattle, // v5: real-time RTS battle screen (null -> tactical fallback)
     requestRedraw: () => { needsRedraw = true; },
     centerOn: (worldX, worldY) => { centerCamera(worldX, worldY); },
     // Hand the canvas + loop to the tactical battle screen, then take it back.

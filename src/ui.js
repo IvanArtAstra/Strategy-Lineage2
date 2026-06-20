@@ -118,7 +118,8 @@ const FALLBACK_STR = {
 export class UI {
   constructor({ renderer, engine, strings, camera, requestRedraw, centerOn,
                 canvas, ctx, battleUi, pauseLoop, resumeLoop, cityApi, openCity,
-                openDefense, openSiege, openHeroes, openCampaign, heroApi, campaignApi }) {
+                openDefense, openSiege, openHeroes, openCampaign, heroApi, campaignApi,
+                openRtsBattle }) {
     this.renderer = renderer;
     this.engine = engine;
     this.strings = strings;
@@ -150,6 +151,9 @@ export class UI {
     this.openCampaign = (typeof openCampaign === 'function') ? openCampaign : null;
     this.heroApi = heroApi || null;        // { recruitHero, heroBattleBonus, gainHeroXp, heroAt, ... }
     this.campaignApi = campaignApi || null; // { campaignList, startScenario, ... }
+    // v5: real-time RTS battle screen (3D Three.js / 2D fallback). When present it
+    // is the primary FIELD-battle path; absent -> degrade to the v2 tactical battle.
+    this.openRtsBattle = (typeof openRtsBattle === 'function') ? openRtsBattle : null;
 
     this.W = 0; this.H = 0;
     this.state = null;             // engine State
@@ -178,6 +182,7 @@ export class UI {
     this.siegeBusy = false;        // siege screen open
     this.heroBusy = false;         // hero roster screen open
     this.campaignBusy = false;     // campaign picker open
+    this.rtsBusy = false;          // v5: RTS battle screen owns its own overlay canvas
     this.skillsOpen = false;       // skills panel visibility
     this.startScroll = 0;          // faction-select vertical scroll offset
     this._startMaxScroll = 0;
@@ -201,11 +206,12 @@ export class UI {
 
   // v4: wire the feature launchers + apis after construction if needed (mirrors
   // setCityHooks). Each is optional; only assigns when a usable value is supplied.
-  setFeatureHooks({ openDefense, openSiege, openHeroes, openCampaign, heroApi, campaignApi } = {}) {
+  setFeatureHooks({ openDefense, openSiege, openHeroes, openCampaign, heroApi, campaignApi, openRtsBattle } = {}) {
     if (typeof openDefense  === 'function') this.openDefense  = openDefense;
     if (typeof openSiege    === 'function') this.openSiege    = openSiege;
     if (typeof openHeroes   === 'function') this.openHeroes   = openHeroes;
     if (typeof openCampaign === 'function') this.openCampaign = openCampaign;
+    if (typeof openRtsBattle === 'function') this.openRtsBattle = openRtsBattle;
     if (heroApi) this.heroApi = heroApi;
     if (campaignApi) this.campaignApi = campaignApi;
   }
@@ -402,7 +408,7 @@ export class UI {
   // v4: true while ANY feature screen (defense/siege/heroes/campaign) owns the
   // canvas. Folded into the same guards as battleBusy/cityBusy below.
   _featureBusy() {
-    return this.defenseBusy || this.siegeBusy || this.heroBusy || this.campaignBusy;
+    return this.defenseBusy || this.siegeBusy || this.heroBusy || this.campaignBusy || this.rtsBusy;
   }
   // True while any screen that takes over the canvas is active (battle, city, or a
   // v4 feature). Used to suppress map input/draw/endTurn while a screen is up.
@@ -519,6 +525,11 @@ export class UI {
       const handled = await this._runSiege(fromId, toId, units, siegeInfo);
       if (handled) return; // siege owned the outcome (applied + refreshed)
       // else: fall through to the tactical/auto path (siege couldn't run).
+    } else if (this.openRtsBattle) {
+      // v5: a FIELD battle (not a siege) -> the real-time RTS screen (3D/2D).
+      const handled = await this._runRts(fromId, toId, units);
+      if (handled) return; // RTS owned the outcome (applied + refreshed)
+      // else: fall through to the tactical/auto path.
     }
     // If planBattle / battle_ui / applyBattleOutcome aren't all present, go auto.
     const canPlan = eng && typeof eng.planBattle === 'function';
@@ -590,6 +601,89 @@ export class UI {
     }
     this.selectedId = toId;
     this._afterAction();
+  }
+
+  // v5: run a REAL-TIME RTS battle for a FIELD attack, then apply its outcome like
+  // the tactical battle. Mirrors _runSiege precisely (pause/resume + try/catch +
+  // graceful fall-through). The RTS screen owns its OWN overlay canvas, so we only
+  // pause the map loop to suppress its draw/input underneath. Returns true if RTS
+  // handled the move (outcome applied), false to fall back to tactical/auto.
+  async _runRts(fromId, toId, units) {
+    const eng = this.engine;
+    const canApply = eng && typeof eng.applyBattleOutcome === 'function';
+    if (!this.openRtsBattle || !canApply) return false;
+
+    let attacker, defender, terrain;
+    if (typeof eng.planBattle === 'function') {
+      let plan = null;
+      try { plan = eng.planBattle(this.state, fromId, toId, units); }
+      catch (e) { plan = null; }
+      if (plan && plan.battle !== true) {
+        // no fight (own/empty target): adopt the moved state so the move still happens.
+        if (plan.state) { this.state = plan.state; this.selectedId = toId; this._afterAction(); return true; }
+        return false;
+      }
+      if (plan && plan.attacker && plan.defender) {
+        attacker = plan.attacker; defender = plan.defender; terrain = plan.terrain;
+      }
+    }
+    if (!attacker || !defender) {
+      const fromProv = this.state && this.state.provinces[fromId];
+      const toProv = this.state && this.state.provinces[toId];
+      if (!fromProv || !toProv) return false;
+      attacker = { faction: fromProv.owner, garrison: { ...(units || fromProv.garrison || {}) } };
+      defender = { faction: toProv.owner, garrison: { ...(toProv.garrison || {}) } };
+      const prdata = (PROVINCES || []).find(p => p.id === toId);
+      terrain = prdata ? prdata.terrain : undefined;
+    }
+
+    this.rtsBusy = true;
+    this.modal = null;
+    let pausedOk = false;
+    try { this.pauseLoop(); pausedOk = true; } catch (e) {}
+    this._play('sfx_battle');
+    const mapThemeKey = this._musicKey;
+    if (this._audio.music_battle) this._playMusic('music_battle');
+
+    let outcome = null;
+    try {
+      outcome = await this.openRtsBattle({
+        hostCanvas: this.canvas,
+        attacker, defender, terrain,
+        seed: this.state && this.state.seed,
+        t: (key, params) => this.t(key, params),
+        assets: this.renderer && this.renderer.images,
+        lang: this.lang,
+        sound: { play: (k) => this._play(k), music: 'music_battle', on: this.audioOn },
+        requestRedraw: this.requestRedraw,
+      });
+    } catch (e) {
+      console.warn('[ui] openRtsBattle threw -> fall back', e && e.message);
+      outcome = null;
+    } finally {
+      this.rtsBusy = false;
+      try { if (pausedOk) this.resumeLoop(); } catch (e) {}
+      this._playMusic(mapThemeKey || (this.state && this._factionThemeKey(this.state.playerFaction)));
+    }
+
+    if (!outcome || !outcome.winner) return false;
+
+    try {
+      const res = eng.applyBattleOutcome(this.state, fromId, toId, units, outcome);
+      if (res && res.state) this.state = res.state;
+      this._showBattle(outcome);
+    } catch (e) {
+      console.warn('[ui] applyBattleOutcome (rts) failed -> fall back', e && e.message);
+      return false;
+    }
+
+    const playerWon = outcome.winner === 'attacker'
+      && attacker && attacker.faction === this.state.playerFaction;
+    if (playerWon) this._grantHeroXp(fromId, 'rts');
+
+    this.selectedId = toId;
+    this._afterAction();
+    return true;
   }
 
   // v4: run a CITY SIEGE for an attack on a walled enemy city, then apply its
