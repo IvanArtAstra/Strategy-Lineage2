@@ -37,10 +37,10 @@ export const START_OWNER = {
   // Human — Kingdom of Aden (royal heartland)
   aden: 'human',
   hardins: 'human',
-  // Elf — Forest of Elmore (central woods, capital Oren)
+  // Elf — Forest of Elmore (capital Oren + Innadril)
   oren: 'elf',
   innadril: 'elf',
-  // Orc — Clan of Schuttgart (NW highlands)
+  // Orc — Clan of Schuttgart (NW highlands + the Elven Forest marches)
   schuttgart: 'orc',
   elvenforest: 'orc',
   // Shilen — Undead Legion incursion footholds on the dark fringes
