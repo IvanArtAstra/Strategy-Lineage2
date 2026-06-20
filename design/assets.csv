@@ -1,0 +1,14 @@
+id,role,type,description,size_ratio,style_line_ref,source,file
+bg_parchment,menu+map backdrop drawn under the canvas,background,aged painted map of Aden on weathered parchment,16:9,STYLE FORMULA,generate,assets/bg_parchment.png
+tile_terrain,seamless province land fill texture,tile,weathered slate-green stone-and-grass land,1:1,STYLE FORMULA,generate,assets/tile_terrain.png
+icon_castle,province castle/keep marker token,ui,ornate stone castle keep with banner,1:1,STYLE FORMULA,generate,assets/icon_castle.png
+unit_knight,army token for Knight / heavy infantry,sprite,armored human knight with kite shield,1:1,STYLE FORMULA,generate,assets/unit_knight.png
+unit_ranger,army token for Hawkeye / archer,sprite,elven ranger drawing a longbow,1:1,STYLE FORMULA,generate,assets/unit_ranger.png
+unit_mage,army token for Sorcerer / mage,sprite,robed human sorcerer with glowing staff,1:1,STYLE FORMULA,generate,assets/unit_mage.png
+unit_orc,army token for Orc Destroyer,sprite,muscular orc raider with great axe,1:1,STYLE FORMULA,generate,assets/unit_orc.png
+unit_undead,army token for Shilen undead,sprite,necrotic skeletal wraith warrior,1:1,STYLE FORMULA,generate,assets/unit_undead.png
+crest_factions,faction crest sheet (4 crests in a 2x2 grid),sprite,heraldic crests: Aden lion / Elf leaf / Orc tusk / Shilen skull,1:1,STYLE FORMULA,generate,assets/crest_factions.png
+music_theme,looping background music for the campaign map,audio,somber epic orchestral fantasy ambience with distant choir and war drums,loop,STYLE TOKEN,generate,assets/audio/theme.mp3
+sfx_select,click when selecting a province or unit,audio,short soft metallic UI tick,oneshot,STYLE TOKEN,generate,assets/audio/sfx_select.mp3
+sfx_battle,battle resolve impact,audio,clash of steel and a heavy war drum hit,oneshot,STYLE TOKEN,generate,assets/audio/sfx_battle.mp3
+sfx_victory,victory / province captured sting,audio,triumphant short brass-and-choir fanfare,oneshot,STYLE TOKEN,generate,assets/audio/sfx_victory.mp3
