@@ -20,6 +20,7 @@ import {
   provinceMeta,
   unitCostFor,
   getCityImpl,
+  getHeroImpl,
 } from './engine.js';
 import { randInt, pick, shuffle } from './rng.js';
 
@@ -32,6 +33,9 @@ const AI = {
                         // only and do not assault other player-factions — gives
                         // every starting position room to establish (fair opening)
   FORTIFY_CHANCE: 0.4, // chance to fortify a frontline province when idle
+  HERO_RICH_THRESHOLD: 800, // v4: only a very rich AI lord splurges on a hero,
+                            // so this never competes with normal recruiting/building
+  HERO_PREFERRED_PROVS: 1, // recruit at most this many heroes per faction
   // Shilen incursion scaling — a darkness that closes in over time.
   SHILEN_START_TURN: 8, // no incursions before this turn — lets every faction
                         // establish past the opening truce before the dark closes in
@@ -126,6 +130,56 @@ function developCities(state, factionId, owned) {
 }
 
 // ---------------------------------------------------------------------------
+// maybeRecruitHero (v4, optional): when a hero api is registered AND a faction
+// is very rich, a lord may hire one hero to lead a frontline province. This is a
+// pure light touch with NO hard dependency on heroes.js — it only acts through
+// the registered api and only if that api exposes the functions it needs, so
+// the game is byte-identical to v3 when the heroes module is absent. It never
+// regresses recruiting/city/combat AI: it runs only on surplus adena and at most
+// once per faction per turn, and silently no-ops on any hiccup.
+// ---------------------------------------------------------------------------
+
+function maybeRecruitHero(state, factionId, owned) {
+  const hero = getHeroImpl();
+  if (!hero || typeof hero.recruitHero !== 'function') return state;
+  const fac = state.factions[factionId];
+  if (!fac || fac.adena < AI.HERO_RICH_THRESHOLD) return state;
+
+  // Only the api can tell us which heroes this faction may hire; if it can't
+  // enumerate candidates we stay out (no hard dependency on hero data here).
+  let candidates = null;
+  try {
+    if (typeof hero.availableHeroes === 'function') candidates = hero.availableHeroes(state, factionId);
+    else if (typeof hero.recruitableHeroes === 'function') candidates = hero.recruitableHeroes(state, factionId);
+  } catch (_e) {
+    return state;
+  }
+  if (!Array.isArray(candidates) || candidates.length === 0) return state;
+
+  // Don't over-hire: cap heroes already led by this faction's provinces.
+  if (typeof hero.heroAt === 'function') {
+    let owns = 0;
+    for (const id of owned) {
+      try { if (hero.heroAt(state, id)) owns++; } catch (_e) { /* ignore */ }
+    }
+    if (owns >= AI.HERO_PREFERRED_PROVS) return state;
+  }
+
+  // Place the hero on a frontline province (else the capital/first owned).
+  const provId = owned.find((id) => isFrontline(state, id, factionId)) || owned[0];
+  // Candidate entries may be ids or {id,...}; take the first usable one.
+  const first = candidates[0];
+  const heroId = typeof first === 'string' ? first : first && first.id;
+  if (!heroId) return state;
+  try {
+    state = hero.recruitHero(state, heroId, provId) || state;
+  } catch (_e) {
+    /* resilient: a hero-api hiccup must never break the AI turn */
+  }
+  return state;
+}
+
+// ---------------------------------------------------------------------------
 // takeFactionTurn: recruit when rich; attack weakest beatable adjacent
 // enemy/neutral; otherwise fortify a frontline holding.
 // ---------------------------------------------------------------------------
@@ -155,6 +209,10 @@ export function takeFactionTurn(state, factionId) {
     if (state.factions[factionId].adena >= before) break; // recruit failed
     recruited++;
   }
+
+  // 1b. HERO (v4, optional): a very rich lord may hire a hero to lead the front.
+  // Fully guarded; pure no-op (v3 behavior) when no hero api is registered.
+  state = maybeRecruitHero(state, factionId, owned);
 
   // 2. ATTACK the weakest beatable adjacent enemy/neutral.
   let attacked = false;
