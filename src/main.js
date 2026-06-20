@@ -398,6 +398,14 @@ async function boot() {
   // The hero_ui mutates state ONLY through these fns.
   const heroApi = {};
   for (const k of HERO_FNS) if (typeof engine[k] === 'function') heroApi[k] = engine[k];
+  // The hero screen reads heroApi.HEROES / heroApi.ITEMS for the recruitable list
+  // and item metadata; heroes.js doesn't re-export them, so forward the data here.
+  try {
+    const hd = await import('./data/heroes.js');
+    const id = await import('./data/items.js');
+    if (hd && hd.HEROES) heroApi.HEROES = hd.HEROES;
+    if (id && id.ITEMS) heroApi.ITEMS = id.ITEMS;
+  } catch (e) { /* data on another branch / absent -> recruit list just empty */ }
   const hasHeroApi = typeof heroApi.heroBattleBonus === 'function'
                   || typeof heroApi.heroesRoster === 'function'
                   || typeof heroApi.recruitHero === 'function';
