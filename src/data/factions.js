@@ -48,7 +48,7 @@ export const FACTIONS = {
     accent: '#caa6e0',
     playable: true,
     capital: 'darkelf',
-    incomeMul: 1.2, // swamp home, no crown: shadow-trade keeps the coffers lean-but-steady
+    incomeMul: 1.28, // swamp home, no crown: shadow-trade compensates a 3-unit roster with no healer
     meleeBonus: 1.15, // glass cannon: hits hard in melee...
     magicBonus: 1.2, //                 ...and harder with shadow magic, but fragile
     roster: ['shillienknight', 'phantomranger', 'spellhowler'],
@@ -60,8 +60,8 @@ export const FACTIONS = {
     accent: '#e8d89a',
     playable: true,
     capital: 'dwarvenvillage',
-    incomeMul: 1.4, // master traders & smiths of the mountain guilds
-    defBonus: 1.15, // tanky: dwarven plate and stubborn shield walls
+    incomeMul: 1.35, // master traders & smiths — strong but no longer the runaway economy
+    defBonus: 1.18, // tanky: dwarven plate and stubborn shield walls
     roster: ['dwarvendefender', 'bountyhunter', 'warsmith'],
   },
   kamael: {
