@@ -9,6 +9,7 @@ import { UI } from './ui.js';
 // We import them dynamically so a missing module during isolated development
 // degrades gracefully instead of crashing the page at parse time.
 let engine = null, strings = null, battleUi = null;
+let eventsMod = null, skillsMod = null;   // event/skill engines (own modules)
 let dataReady = false;
 
 // Try a side-effect registration import; never let a missing sibling crash boot.
@@ -48,8 +49,8 @@ async function loadModules() {
   }
   // v2 side-effect registrations: events + skills engines. Resilient; if the
   // module is absent the engine simply has no events/skills and the UI hides them.
-  await tryRegister('./events.js', ['registerEvents', 'register', 'default']);
-  await tryRegister('./skills.js', ['registerSkills', 'register', 'default']);
+  eventsMod = await tryRegister('./events.js', ['registerEvents', 'register', 'default']);
+  skillsMod = await tryRegister('./skills.js', ['registerSkills', 'register', 'default']);
   // v2 tactical battle UI module (owns the canvas during a manual battle).
   // tactical.js is its dependency; importing battle_ui.js pulls it in, but we
   // also try a bare import so a standalone tactical.js still registers cleanly.
@@ -317,6 +318,16 @@ function frame(now) {
 // ---- Boot ----
 async function boot() {
   await loadModules();
+  // Combined engine facade: the event/skill gameplay functions live in their own
+  // modules (events.js / skills.js), but the UI calls them as engine.* — merge them
+  // onto a plain facade so engine.skillStatus / activateSkill / canActivate /
+  // resolveEvent resolve. Module namespaces are read-only, hence a fresh object.
+  const engineApi = engine ? Object.assign({}, engine) : {};
+  if (eventsMod) for (const k of ['maybeFireEvent', 'resolveEvent'])
+    if (typeof eventsMod[k] === 'function') engineApi[k] = eventsMod[k];
+  if (skillsMod) for (const k of ['skillStatus', 'canActivate', 'activateSkill'])
+    if (typeof skillsMod[k] === 'function') engineApi[k] = skillsMod[k];
+  engine = engineApi;
   renderer = new Renderer(canvas);
   ui = new UI({
     renderer,
