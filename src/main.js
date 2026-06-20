@@ -8,8 +8,25 @@ import { UI } from './ui.js';
 // ---- Resilient module loading (engine/data/strings live on other branches) ----
 // We import them dynamically so a missing module during isolated development
 // degrades gracefully instead of crashing the page at parse time.
-let engine = null, strings = null;
+let engine = null, strings = null, battleUi = null;
 let dataReady = false;
+
+// Try a side-effect registration import; never let a missing sibling crash boot.
+async function tryRegister(path, registerFns) {
+  try {
+    const mod = await import(path);
+    // Call any of the named register* exports if present (engine wires the system).
+    for (const fn of registerFns) {
+      if (mod && typeof mod[fn] === 'function') {
+        try { mod[fn](engine); } catch (e) { /* registration is best-effort */ }
+      }
+    }
+    return mod;
+  } catch (e) {
+    console.warn(`[main] ${path} not available yet:`, e.message);
+    return null;
+  }
+}
 
 async function loadModules() {
   try {
@@ -24,6 +41,20 @@ async function loadModules() {
     strings = await import('./strings.js');
   } catch (e) {
     console.warn('[main] strings.js not available yet:', e.message);
+  }
+  // v2 side-effect registrations: events + skills engines. Resilient; if the
+  // module is absent the engine simply has no events/skills and the UI hides them.
+  await tryRegister('./events.js', ['registerEvents', 'register', 'default']);
+  await tryRegister('./skills.js', ['registerSkills', 'register', 'default']);
+  // v2 tactical battle UI module (owns the canvas during a manual battle).
+  // tactical.js is its dependency; importing battle_ui.js pulls it in, but we
+  // also try a bare import so a standalone tactical.js still registers cleanly.
+  try { await import('./tactical.js'); } catch (e) { /* optional dep */ }
+  try {
+    battleUi = await import('./battle_ui.js');
+  } catch (e) {
+    console.warn('[main] battle_ui.js not available yet:', e.message);
+    battleUi = null;
   }
   dataReady = true;
 }
@@ -40,6 +71,7 @@ const DPR_CAP = 1.5;
 
 let viewW = 0, viewH = 0, dpr = 1;
 let running = true;
+let battlePaused = false;        // true while the tactical battle owns the canvas/loop
 let needsRedraw = true;          // redraw-only-on-change flag (perf)
 
 // Camera: pan + zoom, clamped to map bounds by the renderer.
@@ -67,8 +99,12 @@ window.addEventListener('orientationchange', () => setTimeout(resize, 60));
 
 // ---- Pause on blur/focus (Higgsfield solo skeleton) ----
 window.addEventListener('blur', () => { running = false; });
-window.addEventListener('focus', () => { running = true; lastTime = performance.now(); acc = 0; });
+window.addEventListener('focus', () => {
+  if (battlePaused) return;        // battle screen owns the loop; don't resume the map
+  running = true; lastTime = performance.now(); acc = 0;
+});
 document.addEventListener('visibilitychange', () => {
+  if (battlePaused) return;        // leave map paused while a tactical battle runs
   running = document.visibilityState === 'visible';
   if (running) { lastTime = performance.now(); acc = 0; }
 });
@@ -119,8 +155,11 @@ function onPointerMove(e) {
   if (dragging && lastPan) {
     const dx = p.x - lastPan.x, dy = p.y - lastPan.y;
     if (Math.abs(dx) + Math.abs(dy) > TAP_SLOP) dragMoved = true;
-    // Only pan the world when not interacting with HUD and a world point is grabbed.
-    if (!ui || !ui.isModal()) {
+    // Faction-select screen: vertical drag scrolls the card grid.
+    if (ui && ui.screen === 'start') {
+      if (ui.onScroll) { ui.onScroll(-dy); needsRedraw = true; }
+    } else if (!ui || !ui.isModal()) {
+      // Only pan the world when not interacting with HUD and a world point is grabbed.
       camera.x -= dx / camera.zoom;
       camera.y -= dy / camera.zoom;
       clampCamera();
@@ -187,6 +226,8 @@ canvas.addEventListener('pointerup', onPointerUp);
 canvas.addEventListener('pointercancel', onPointerUp);
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
+  // On the faction-select screen, the wheel scrolls the card grid.
+  if (ui && ui.onScroll && ui.onScroll(e.deltaY)) { needsRedraw = true; return; }
   const p = pointerPos(e);
   zoomAt(p.x, p.y, e.deltaY < 0 ? 1.1 : 0.9);
   needsRedraw = true;
@@ -198,9 +239,27 @@ window.addEventListener('keydown', (e) => {
   let handled = true;
   switch (e.code) {
     case 'Space':   ui.dispatch({ type: 'endTurn' }); break;
-    case 'Escape':  ui.dispatch({ type: 'deselect' }); break;
+    case 'Escape':
+      // Esc backs out of skill target-pick / open panel / event-result first.
+      if (ui.skillTarget) ui.dispatch({ type: 'cancelSkill' });
+      else if (ui.skillsOpen) ui.dispatch({ type: 'toggleSkills' });
+      else ui.dispatch({ type: 'deselect' });
+      break;
     case 'KeyM':    ui.dispatch({ type: 'toggleAudio' }); break;
     case 'KeyL':    ui.dispatch({ type: 'toggleLang' }); break;
+    case 'KeyK':    ui.dispatch({ type: 'toggleSkills' }); break;  // skills panel
+    case 'Enter':
+    case 'NumpadEnter':
+      // Confirm the active modal: confirm dialog, event continue, or battle close.
+      if (ui.modal && ui.modal.kind === 'confirm') ui.dispatch({ type: 'confirmYes' });
+      else if (ui.modal && ui.modal.kind === 'event') {
+        if (ui.modal.result) ui.dispatch({ type: 'closeEvent' });
+        // (event choices need an explicit pick; Enter only advances the result)
+        else handled = false;
+      }
+      else if (ui.modal && ui.modal.kind === 'battle') ui.dispatch({ type: 'closeModal' });
+      else handled = false;
+      break;
     default: handled = false;
   }
   if (handled) { e.preventDefault(); needsRedraw = true; }
@@ -218,6 +277,8 @@ function update(dt) {
 }
 
 function render() {
+  // While a tactical battle owns the canvas, do not draw the map/HUD over it.
+  if (ui && ui.ownsCanvas && ui.ownsCanvas()) return;
   if (renderer && ui) {
     renderer.draw(ctx, ui.getState(), camera, ui.hoverId);
     ui.draw(ctx, viewW, viewH);
@@ -236,7 +297,7 @@ function frame(now) {
     let steps = 0;
     while (acc >= STEP && steps < 5) { update(STEP); acc -= STEP; steps++; }
   }
-  if (needsRedraw || (ui && ui.animating())) {
+  if (needsRedraw || (ui && ui.animating()) || (renderer && renderer.hasFx && renderer.hasFx())) {
     render();
     needsRedraw = false;
   }
@@ -258,8 +319,19 @@ async function boot() {
     engine,
     strings,
     camera,
+    canvas,
+    ctx,
+    battleUi,
     requestRedraw: () => { needsRedraw = true; },
     centerOn: (worldX, worldY) => { centerCamera(worldX, worldY); },
+    // Hand the canvas + loop to the tactical battle screen, then take it back.
+    pauseLoop: () => { battlePaused = true; running = false; },
+    resumeLoop: () => {
+      battlePaused = false; running = true;
+      lastTime = performance.now(); acc = 0; needsRedraw = true;
+      // The battle screen drew over our canvas; re-fit our layout on return.
+      if (renderer) renderer.layout(viewW, viewH);
+    },
   });
   await renderer.loadAssets();
   await ui.init();

@@ -3,7 +3,7 @@
 // Robust to missing assets: every image has a procedural fallback in the STYLE palette.
 
 import { PROVINCES, NEUTRAL } from './data/map.js';
-import { FACTIONS } from './data/factions.js';
+import { FACTIONS, PLAYABLE } from './data/factions.js';
 import { UNITS, SPRITE_FOR } from './data/units.js';
 
 // ---- STYLE FORMULA palette (procedural art must honor this) ----
@@ -33,6 +33,13 @@ const ASSET_FILES = {
   unit_mage:    'assets/unit_mage.png',
   unit_orc:     'assets/unit_orc.png',
   unit_undead:  'assets/unit_undead.png',
+  // v2 expansion sprites (new factions). Each has a procedural fallback.
+  unit_darkelf: 'assets/unit_darkelf.png',
+  unit_dwarf:   'assets/unit_dwarf.png',
+  unit_kamael:  'assets/unit_kamael.png',
+  // v2 crest sheet: 3x2 grid in PLAYABLE order (human,elf,orc,darkelf,dwarf,kamael).
+  crest_all:    'assets/crest_all.png',
+  // v1 crest sheet: 2x2 grid (human,elf / orc,shilen). Kept as fallback.
   crest_factions: 'assets/crest_factions.png',
 };
 
@@ -47,8 +54,50 @@ export class Renderer {
     this.nodes = {};         // provId -> {x,y,r} in board (world) coords
     this.edges = [];         // [ [aId,bId] ]
     this.glowT = 0;
+    this.fx = [];            // transient skill/battle VFX: {provId, kind, color, t, dur}
     this._buildGraph();
   }
+
+  // ---- Skill VFX hook (owner: client). UI calls this when a skill resolves on
+  // a province; the pulse rides on top of the map for ~0.9s. Pure cosmetic.
+  // kind: 'heal'|'smite'|'summon'|'bless'|'fortify'|'scry'|'generic'.
+  spawnSkillFx(provId, kind = 'generic', color) {
+    if (!provId) return;
+    this.fx.push({ provId, kind, color: color || PALETTE.gold, t: 0, dur: 0.9 });
+  }
+
+  _drawFx(ctx, cam, dt) {
+    if (!this.fx.length) return;
+    for (let i = this.fx.length - 1; i >= 0; i--) {
+      const f = this.fx[i];
+      f.t += dt || 0.016;
+      const node = this.nodes[f.provId];
+      if (!node || f.t >= f.dur) { this.fx.splice(i, 1); continue; }
+      const s = this.worldToScreen(node.x, node.y, cam);
+      const k = f.t / f.dur;                 // 0..1
+      const r = node.r * cam.zoom;
+      const alpha = 0.55 * (1 - k);
+      // expanding ring
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, r * (1 + k * 1.6), 0, Math.PI * 2);
+      ctx.lineWidth = Math.max(2, r * 0.16 * (1 - k));
+      ctx.strokeStyle = this._rgba(f.color, alpha);
+      ctx.stroke();
+      // inner glow
+      this._glow(ctx, s.x, s.y, r * (1.2 + k), f.color, alpha * 0.7);
+      if (f.kind === 'smite') {
+        // downward bolt accent for offensive skills
+        ctx.strokeStyle = this._rgba(f.color, alpha);
+        ctx.lineWidth = Math.max(2, r * 0.12);
+        ctx.beginPath();
+        ctx.moveTo(s.x, s.y - r * 2.2 * (1 - k));
+        ctx.lineTo(s.x, s.y);
+        ctx.stroke();
+      }
+    }
+  }
+
+  hasFx() { return this.fx.length > 0; }
 
   _buildGraph() {
     // Build symmetric edge list once from PROVINCES adjacency.
@@ -194,6 +243,9 @@ export class Renderer {
       const s = this.worldToScreen(n.x, n.y, cam);
       this._drawGarrison(ctx, s.x, s.y, n.r * cam.zoom, prov.garrison, prov.owner, cam.zoom);
     }
+
+    // Transient skill VFX on top of everything.
+    this._drawFx(ctx, cam, 0.016);
   }
 
   _drawBackground(ctx, cam, W, H) {
@@ -431,7 +483,23 @@ export class Renderer {
   }
 
   // ---- Crest helper for UI (faction crest from sheet or procedural). ----
+  // Primary: crest_all.png, a 3x2 grid in PLAYABLE order
+  //   [human elf orc / darkelf dwarf kamael]. Cell index = PLAYABLE.indexOf(faction).
+  // Fallback: legacy crest_factions.png, a 2x2 grid [human elf / orc shilen].
+  // Last resort: procedural shield in the faction color.
   drawCrest(ctx, faction, x, y, size) {
+    // 3x2 sheet sliced by PLAYABLE order (6 factions).
+    const all = this.images.crest_all;
+    const playable = (PLAYABLE && PLAYABLE.length) ? PLAYABLE : ['human', 'elf', 'orc'];
+    const idx = playable.indexOf(faction);
+    if (all && all.ok && idx >= 0) {
+      const cols = 3, rows = 2;
+      const iw = all.img.width / cols, ih = all.img.height / rows;
+      const cx = idx % cols, cy = Math.floor(idx / cols);
+      ctx.drawImage(all.img, cx * iw, cy * ih, iw, ih, x, y, size, size);
+      return;
+    }
+    // Legacy 2x2 sheet (covers human/elf/orc/shilen only).
     const sheet = this.images.crest_factions;
     const order = { human: [0, 0], elf: [1, 0], orc: [0, 1], shilen: [1, 1] };
     if (sheet && sheet.ok && order[faction]) {
