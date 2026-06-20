@@ -179,14 +179,20 @@ export function takeFactionTurn(state, factionId) {
 // nearest non-shilen holdings. Runs every AI.SHILEN_EVERY turns.
 // ---------------------------------------------------------------------------
 
-export function shilenIncursion(state) {
-  if (state.turn < AI.SHILEN_START_TURN) return state;
-  if (state.turn % AI.SHILEN_EVERY !== 0) return state;
+export function shilenIncursion(state, opts) {
+  const force = !!(opts && opts.force);
+  // Normal cadence gate; a forced incursion (e.g. an event's spawnIncursion
+  // effect) bypasses the start-turn and cadence checks.
+  if (!force) {
+    if (state.turn < AI.SHILEN_START_TURN) return state;
+    if (state.turn % AI.SHILEN_EVERY !== 0) return state;
+  }
 
-  // Stack size scales with elapsed turns, capped.
+  // Stack size scales with elapsed turns, capped. A forced early incursion
+  // still spawns at least the base stack.
   const size = Math.min(
     AI.SHILEN_MAX_STACK,
-    Math.round(AI.SHILEN_BASE_STACK + state.turn * AI.SHILEN_PER_TURN)
+    Math.max(AI.SHILEN_BASE_STACK, Math.round(AI.SHILEN_BASE_STACK + state.turn * AI.SHILEN_PER_TURN))
   );
   if (size <= 0) return state;
 
