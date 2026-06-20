@@ -10,6 +10,7 @@ import { UI } from './ui.js';
 // degrades gracefully instead of crashing the page at parse time.
 let engine = null, strings = null, battleUi = null;
 let eventsMod = null, skillsMod = null;   // event/skill engines (own modules)
+let cityMod = null, cityUiMod = null;     // v3: city engine (city.js) + city screen (city_ui.js)
 let dataReady = false;
 
 // Try a side-effect registration import; never let a missing sibling crash boot.
@@ -51,6 +52,11 @@ async function loadModules() {
   // module is absent the engine simply has no events/skills and the UI hides them.
   eventsMod = await tryRegister('./events.js', ['registerEvents', 'register', 'default']);
   skillsMod = await tryRegister('./skills.js', ['registerSkills', 'register', 'default']);
+  // v3 side-effect registration: city engine (city.js). registerCity() wires the
+  // per-turn cityTick into endTurn (mirrors registerEvents/registerSkills). The
+  // module namespace is kept so its query/mutation fns can be merged onto the
+  // engine facade below. Absent module -> no cities, the map plays exactly as v2.
+  cityMod = await tryRegister('./city.js', ['registerCity', 'register', 'default']);
   // v2 tactical battle UI module (owns the canvas during a manual battle).
   // tactical.js is its dependency; importing battle_ui.js pulls it in, but we
   // also try a bare import so a standalone tactical.js still registers cleanly.
@@ -60,6 +66,14 @@ async function loadModules() {
   } catch (e) {
     console.warn('[main] battle_ui.js not available yet:', e.message);
     battleUi = null;
+  }
+  // v3 city screen module (owns the canvas while a city is open, like battle_ui).
+  // Resilient: absent -> the UI hides the "Enter city" button and the map stays v2.
+  try {
+    cityUiMod = await import('./city_ui.js');
+  } catch (e) {
+    console.warn('[main] city_ui.js not available yet:', e.message);
+    cityUiMod = null;
   }
   dataReady = true;
 }
@@ -327,7 +341,21 @@ async function boot() {
     if (typeof eventsMod[k] === 'function') engineApi[k] = eventsMod[k];
   if (skillsMod) for (const k of ['skillStatus', 'canActivate', 'activateSkill'])
     if (typeof skillsMod[k] === 'function') engineApi[k] = skillsMod[k];
+  // v3: merge the city engine fns onto the same facade so the UI calls them as
+  // engine.hasCity / engine.cityView / engine.canBuild / engine.startBuild /
+  // engine.ensureCity. If city.js is absent these stay undefined and the UI's
+  // typeof-guards hide the "Enter city" button (game degrades to v2).
+  if (cityMod) for (const k of ['hasCity', 'cityView', 'canBuild', 'startBuild', 'ensureCity'])
+    if (typeof cityMod[k] === 'function') engineApi[k] = cityMod[k];
   engine = engineApi;
+  // Build a stand-alone city api object (the subset openCity expects as `city`),
+  // sourced from the merged facade so it tracks whatever city.js actually exports.
+  const cityApi = {};
+  for (const k of ['hasCity', 'cityView', 'canBuild', 'startBuild', 'ensureCity'])
+    if (typeof engine[k] === 'function') cityApi[k] = engine[k];
+  const hasCityApi = typeof cityApi.hasCity === 'function';
+  const openCity = (cityUiMod && typeof cityUiMod.openCity === 'function')
+    ? cityUiMod.openCity : null;
   renderer = new Renderer(canvas);
   ui = new UI({
     renderer,
@@ -337,17 +365,30 @@ async function boot() {
     canvas,
     ctx,
     battleUi,
+    // v3 city screen: the city api subset + openCity entry-point. Both may be
+    // null/empty on isolated branches; the UI guards every call (typeof) so the
+    // "Enter city" button only appears when city.hasCity + openCity both exist.
+    cityApi: hasCityApi ? cityApi : null,
+    openCity,
     requestRedraw: () => { needsRedraw = true; },
     centerOn: (worldX, worldY) => { centerCamera(worldX, worldY); },
     // Hand the canvas + loop to the tactical battle screen, then take it back.
+    // The SAME pause/resume hooks are reused for the city screen (city_ui owns
+    // the canvas exactly like battle_ui).
     pauseLoop: () => { battlePaused = true; running = false; },
     resumeLoop: () => {
       battlePaused = false; running = true;
       lastTime = performance.now(); acc = 0; needsRedraw = true;
-      // The battle screen drew over our canvas; re-fit our layout on return.
+      // The battle/city screen drew over our canvas; re-fit our layout on return.
       if (renderer) renderer.layout(viewW, viewH);
     },
   });
+  // v3: give the renderer a hasCity predicate so it can draw a city marker on
+  // city provinces (data-driven). Guarded; absent -> renderer falls back to its
+  // own capital/castle derivation and never crashes.
+  if (renderer && typeof renderer.setCityPredicate === 'function') {
+    renderer.setCityPredicate(typeof cityApi.hasCity === 'function' ? cityApi.hasCity : null);
+  }
   await renderer.loadAssets();
   await ui.init();
   resize();

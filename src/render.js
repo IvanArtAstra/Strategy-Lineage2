@@ -41,6 +41,8 @@ const ASSET_FILES = {
   crest_all:    'assets/crest_all.png',
   // v1 crest sheet: 2x2 grid (human,elf / orc,shilen). Kept as fallback.
   crest_factions: 'assets/crest_factions.png',
+  // v3 resource icon sheet: 1x3 in order adena, wood, crystal. Procedural fallback.
+  resources_sheet: 'assets/resources_sheet.png',
 };
 
 export class Renderer {
@@ -55,7 +57,39 @@ export class Renderer {
     this.edges = [];         // [ [aId,bId] ]
     this.glowT = 0;
     this.fx = [];            // transient skill/battle VFX: {provId, kind, color, t, dur}
+    // v3: optional predicate (provId)->bool from the city engine, set by main.js.
+    // When absent we derive cities from data: capitals (FACTIONS[*].capital) +
+    // castles (province.castle) — matching the v3 contract (§2). Never crashes.
+    this._hasCityFn = null;
     this._buildGraph();
+    this._buildCitySet();
+  }
+
+  // v3: main.js hands us the city engine's hasCity predicate (guarded). Absent ->
+  // we keep using the data-derived city set built from capitals + castles.
+  setCityPredicate(fn) {
+    this._hasCityFn = (typeof fn === 'function') ? fn : null;
+  }
+
+  // Data-derived fallback set of city provinces: faction capitals + castles.
+  _buildCitySet() {
+    this._cityIds = new Set();
+    try {
+      for (const fid in (FACTIONS || {})) {
+        const cap = FACTIONS[fid] && FACTIONS[fid].capital;
+        if (cap) this._cityIds.add(cap);
+      }
+      for (const p of (PROVINCES || [])) if (p && p.castle) this._cityIds.add(p.id);
+    } catch (e) { /* keep whatever we have */ }
+  }
+
+  // Whether a province should show a city marker. Prefer the engine predicate;
+  // fall back to the data-derived set. Guarded so a throwing predicate degrades.
+  _provinceHasCity(provId) {
+    if (this._hasCityFn) {
+      try { return !!this._hasCityFn(provId); } catch (e) { /* fall through */ }
+    }
+    return this._cityIds ? this._cityIds.has(provId) : false;
   }
 
   // ---- Skill VFX hook (owner: client). UI calls this when a skill resolves on
@@ -232,7 +266,7 @@ export class Renderer {
       const owner = prov ? prov.owner : NEUTRAL;
       const s = this.worldToScreen(n.x, n.y, cam);
       const r = n.r * cam.zoom;
-      this._drawProvince(ctx, s.x, s.y, r, owner, player, n, id === hoverId, id === selected, legal && legal.includes(id));
+      this._drawProvince(ctx, s.x, s.y, r, owner, player, n, id === hoverId, id === selected, legal && legal.includes(id), this._provinceHasCity(id));
     }
 
     // Army tokens (above province nodes).
@@ -279,7 +313,7 @@ export class Renderer {
     }
   }
 
-  _drawProvince(ctx, x, y, r, owner, player, node, hover, selected, legal) {
+  _drawProvince(ctx, x, y, r, owner, player, node, hover, selected, legal, hasCity) {
     const fac = FACTIONS[owner];
     const ownerColor = (owner === NEUTRAL || !fac) ? PALETTE.neutral : fac.color;
 
@@ -334,6 +368,47 @@ export class Renderer {
 
     // Castle marker.
     if (node.castle) this._drawCastle(ctx, x, y - r - 8, r * 0.7);
+
+    // v3: small city banner/marker on city provinces (capitals + castles, or per
+    // the engine predicate). Drawn at bottom-right so it doesn't fight the castle
+    // marker (top). Purely cosmetic; signals "you can Enter this city".
+    if (hasCity) this._drawCityMarker(ctx, x + r * 0.7, y + r * 0.7, Math.max(8, r * 0.42), owner, player);
+  }
+
+  // A pennant-on-a-pole city marker in the owner's color (or player gold on your
+  // own holdings), with a bronze outline so it reads on any terrain.
+  _drawCityMarker(ctx, x, y, s, owner, player) {
+    const fac = FACTIONS[owner];
+    const isPlayer = owner === player && owner !== NEUTRAL;
+    const flagCol = isPlayer ? PALETTE.gold
+                  : owner === 'shilen' ? PALETTE.necroGlow
+                  : (fac ? fac.color : PALETTE.neutral);
+    ctx.save();
+    ctx.translate(x, y);
+    // pole
+    ctx.strokeStyle = PALETTE.bronze;
+    ctx.lineWidth = Math.max(1.4, s * 0.16);
+    ctx.beginPath();
+    ctx.moveTo(0, s * 0.8);
+    ctx.lineTo(0, -s * 0.9);
+    ctx.stroke();
+    // pennant (triangle) flying from the top of the pole
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 0.9);
+    ctx.lineTo(s * 1.1, -s * 0.55);
+    ctx.lineTo(0, -s * 0.2);
+    ctx.closePath();
+    ctx.fillStyle = flagCol;
+    ctx.fill();
+    ctx.lineWidth = Math.max(1, s * 0.1);
+    ctx.strokeStyle = PALETTE.ink;
+    ctx.stroke();
+    // base dot
+    ctx.beginPath();
+    ctx.arc(0, s * 0.8, s * 0.22, 0, Math.PI * 2);
+    ctx.fillStyle = PALETTE.bronzeLight;
+    ctx.fill();
+    ctx.restore();
   }
 
   _drawCastle(ctx, x, y, size) {
@@ -478,6 +553,50 @@ export class Renderer {
         ctx.moveTo(0, -u); ctx.lineTo(u * 0.8, -u * 0.5); ctx.lineTo(u * 0.8, u * 0.4);
         ctx.lineTo(0, u); ctx.lineTo(-u * 0.8, u * 0.4); ctx.lineTo(-u * 0.8, -u * 0.5); ctx.closePath();
         ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // ---- v3: resource icon helper for the HUD. ----
+  // Slices assets/resources_sheet.png as a 1x3 strip in order adena(0), wood(1),
+  // crystal(2). If the sheet is missing, draws a procedural emblem per resource
+  // in the STYLE palette so the HUD always reads. `idx` = 0|1|2; (x,y,size) box.
+  drawResourceIcon(ctx, idx, x, y, size) {
+    const sheet = this.images.resources_sheet;
+    if (sheet && sheet.ok && idx >= 0 && idx < 3) {
+      const cols = 3;
+      const iw = sheet.img.width / cols, ih = sheet.img.height;
+      ctx.drawImage(sheet.img, idx * iw, 0, iw, ih, x, y, size, size);
+      return;
+    }
+    // Procedural fallbacks: gold coin / wood log / crystal shard.
+    const cx = x + size / 2, cy = y + size / 2, u = size * 0.4;
+    ctx.save();
+    ctx.lineWidth = Math.max(1, size * 0.06);
+    ctx.strokeStyle = PALETTE.bronze;
+    if (idx === 0) {                 // adena = coin
+      ctx.beginPath(); ctx.arc(cx, cy, u, 0, Math.PI * 2);
+      ctx.fillStyle = PALETTE.gold; ctx.fill(); ctx.stroke();
+      ctx.fillStyle = PALETTE.bronze;
+      ctx.font = `bold ${Math.round(size * 0.5)}px serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('₳', cx, cy + size * 0.04);
+      ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
+    } else if (idx === 1) {          // wood = log
+      ctx.fillStyle = '#7a5a32';
+      ctx.beginPath();
+      ctx.moveTo(cx - u, cy - u * 0.5); ctx.lineTo(cx + u, cy - u * 0.5);
+      ctx.lineTo(cx + u, cy + u * 0.5); ctx.lineTo(cx - u, cy + u * 0.5);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = '#caa46a';
+      ctx.beginPath(); ctx.ellipse(cx + u, cy, u * 0.3, u * 0.5, 0, 0, Math.PI * 2); ctx.stroke();
+    } else {                         // crystal = shard
+      ctx.fillStyle = '#9fd0e0';
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - u); ctx.lineTo(cx + u * 0.7, cy);
+      ctx.lineTo(cx, cy + u); ctx.lineTo(cx - u * 0.7, cy);
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = PALETTE.bronzeLight; ctx.stroke();
     }
     ctx.restore();
   }
