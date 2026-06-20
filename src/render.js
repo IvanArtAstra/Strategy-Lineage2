@@ -43,6 +43,21 @@ const ASSET_FILES = {
   crest_factions: 'assets/crest_factions.png',
   // v3 resource icon sheet: 1x3 in order adena, wood, crystal. Procedural fallback.
   resources_sheet: 'assets/resources_sheet.png',
+  // v4 feature sheets (consumed by the feature screens via renderer.images; each
+  // has a procedural fallback inside its own UI). The map renderer only owns image
+  // loading, so we load them here too and hand renderer.images to each open* fn.
+  //   td_bg        — wave-defense backdrop
+  //   towers_sheet — 3x2 tower icons (by tower.icon)
+  //   mobs_sheet   — 1x4 mob sprites (skeleton,ghoul,wraith,bonegolem)
+  //   heroes_sheet — 3x2 hero portraits (by hero.portrait)
+  //   items_sheet  — 3x3 item icons (by item.icon)
+  //   siege_bg     — castle-gate siege backdrop
+  td_bg:        'assets/td_bg.png',
+  towers_sheet: 'assets/towers_sheet.png',
+  mobs_sheet:   'assets/mobs_sheet.png',
+  heroes_sheet: 'assets/heroes_sheet.png',
+  items_sheet:  'assets/items_sheet.png',
+  siege_bg:     'assets/siege_bg.png',
 };
 
 export class Renderer {
@@ -61,6 +76,10 @@ export class Renderer {
     // When absent we derive cities from data: capitals (FACTIONS[*].capital) +
     // castles (province.castle) — matching the v3 contract (§2). Never crashes.
     this._hasCityFn = null;
+    // v4: optional (provId)->hero|null predicate from the heroes engine, set by
+    // main.js. When present we draw a small hero pennant on provinces with an
+    // assigned hero. Absent -> no pennant (base map rendering unchanged).
+    this._heroAtFn = null;
     this._buildGraph();
     this._buildCitySet();
   }
@@ -69,6 +88,19 @@ export class Renderer {
   // we keep using the data-derived city set built from capitals + castles.
   setCityPredicate(fn) {
     this._hasCityFn = (typeof fn === 'function') ? fn : null;
+  }
+
+  // v4: main.js hands us the heroes engine's heroAt predicate (guarded). Absent ->
+  // no hero pennant. Used purely for the cosmetic per-province hero marker.
+  setHeroPredicate(fn) {
+    this._heroAtFn = (typeof fn === 'function') ? fn : null;
+  }
+
+  // Whether a province has an assigned hero. Guarded so a throwing predicate
+  // (or a state-less call before a game starts) degrades to no pennant.
+  _provinceHero(provId, state) {
+    if (!this._heroAtFn) return null;
+    try { return this._heroAtFn(state, provId) || null; } catch (e) { return null; }
   }
 
   // Data-derived fallback set of city provinces: faction capitals + castles.
@@ -267,6 +299,12 @@ export class Renderer {
       const s = this.worldToScreen(n.x, n.y, cam);
       const r = n.r * cam.zoom;
       this._drawProvince(ctx, s.x, s.y, r, owner, player, n, id === hoverId, id === selected, legal && legal.includes(id), this._provinceHasCity(id));
+      // v4: hero pennant for a province that has an assigned hero (guarded; absent
+      // hero api -> never drawn). Placed bottom-left so it doesn't fight the castle
+      // (top) or the city marker (bottom-right). Purely cosmetic.
+      if (this._heroAtFn && this._provinceHero(id, state)) {
+        this._drawHeroPennant(ctx, s.x - r * 0.7, s.y + r * 0.7, Math.max(8, r * 0.42), owner, player);
+      }
     }
 
     // Army tokens (above province nodes).
@@ -407,6 +445,47 @@ export class Renderer {
     ctx.beginPath();
     ctx.arc(0, s * 0.8, s * 0.22, 0, Math.PI * 2);
     ctx.fillStyle = PALETTE.bronzeLight;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // v4: a small heraldic pennant marking a province that has an assigned hero.
+  // A crowned shield in the owner's color (gold on your own holdings) with a
+  // bronze outline, distinct from the triangular city marker so the two read apart.
+  _drawHeroPennant(ctx, x, y, s, owner, player) {
+    const fac = FACTIONS[owner];
+    const isPlayer = owner === player && owner !== NEUTRAL;
+    const col = isPlayer ? PALETTE.gold
+              : owner === 'shilen' ? PALETTE.necroGlow
+              : (fac ? fac.color : PALETTE.neutral);
+    ctx.save();
+    ctx.translate(x, y);
+    const u = s * 0.6;
+    // shield
+    ctx.beginPath();
+    ctx.moveTo(0, -u);
+    ctx.lineTo(u * 0.8, -u * 0.5);
+    ctx.lineTo(u * 0.8, u * 0.3);
+    ctx.lineTo(0, u);
+    ctx.lineTo(-u * 0.8, u * 0.3);
+    ctx.lineTo(-u * 0.8, -u * 0.5);
+    ctx.closePath();
+    ctx.fillStyle = col;
+    ctx.fill();
+    ctx.lineWidth = Math.max(1, s * 0.12);
+    ctx.strokeStyle = PALETTE.bronze;
+    ctx.stroke();
+    // little crown accent (three points) to denote a commander
+    ctx.fillStyle = PALETTE.bronzeLight;
+    ctx.beginPath();
+    ctx.moveTo(-u * 0.5, -u * 0.55);
+    ctx.lineTo(-u * 0.5, -u * 0.85);
+    ctx.lineTo(-u * 0.2, -u * 0.6);
+    ctx.lineTo(0, -u * 0.9);
+    ctx.lineTo(u * 0.2, -u * 0.6);
+    ctx.lineTo(u * 0.5, -u * 0.85);
+    ctx.lineTo(u * 0.5, -u * 0.55);
+    ctx.closePath();
     ctx.fill();
     ctx.restore();
   }
