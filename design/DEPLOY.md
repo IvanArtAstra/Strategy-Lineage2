@@ -27,3 +27,10 @@ Wood + Crystal resources; resource + unit production; AI city development), the 
 lore event-chain, a 6-faction balance pass, and 5 new music tracks (battle/victory/city/darkelf/orc).
 New design contract: `design/interfaces-v3.md`. Built across branches feat/content-v3,
 feat/city-logic, feat/engine-core, feat/city-client, feat/map-client, feat/assets-v3.
+
+## Update — Defense, Sieges, Heroes, Campaign (2026-06-21)
+Redeployed in place (same game_id / same URL). Adds: a real-time WAVE-DEFENSE (tower-defense)
+mode (5 towers, 8 waves, bone-golem boss, bonus rewards), CITY SIEGES (wall integrity by Walls
+level, batter/storm/hold), HERO-COMMANDERS (6 heroes, items/inventory, leveling, battle bonuses),
+and a 5-mission CAMPAIGN. New contract: design/interfaces-v4.md. Built across branches feat/td,
+feat/siege, feat/heroes, feat/campaign, feat/engine-v4, feat/map-v4, feat/content-v4, feat/assets-v4.
